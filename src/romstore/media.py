@@ -43,11 +43,14 @@ NAS 侧（Pegasus 约定）：
    `gba`/`psp` 用 `media/` + 每游戏子目录）。硬编码会跟系统既有习惯打架，
    所以 `pick_media_dir()` 优先**沿用该系统既有的写法**，探测不到才用默认。
 
-## 为什么不做视频
+## 关于视频
 
-`video.mp4` 一张 2 MB，而掌机 SD 写速只有 4.8 MB/s —— 下 20 个游戏就多花
-一分半，还会把本就不多的 `/roms` 空间（剩 13 G）吃掉。本模块**只做图片**（118–400 KB），
-视频留给后续版本按需选装。
+`video.mp4` 一张 2 MB，而掌机 SD 写速只有 4.8 MB/s —— 装 20 个游戏就多花
+一分半，还会把本就不多的 `/roms` 空间（剩 13 G）吃掉。所以**安装时不复制视频**，
+本模块的复制链路只做图片（118–400 KB）。
+
+但**预览视频不需要落地**：商店详情页按播放键时直接播 NAS 上的源文件
+（见 `find_video()`），既不占 SD 空间也不占下载时间。
 """
 import os
 import re
@@ -60,6 +63,12 @@ _LOGO_STEMS = ('logo', 'marquee', 'wheel')
 _EXTS = ('.png', '.jpg', '.jpeg', '.webp')
 
 _IMG_EXTS = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
+
+# 预览视频（NAS 侧 media/<stem>/video.mp4）。
+# 其实只有视频**不被复制到掌机**，只是在商店详情页里直接播 NAS 上的源文件，
+# 所以不受"只做图片"那条约束 —— 见下方 find_video()。
+_VIDEO_STEMS = ('video', 'preview', 'trailer', 'gameplay', 'movie')
+_VIDEO_EXTS = ('.mp4', '.mkv', '.avi', '.webm', '.mov', '.mpg', '.mpeg', '.m4v', '.ts')
 
 # 掌机侧图片目录名：默认 img（实测 nes 928 条全用它 + 散文件）
 DEFAULT_MEDIA_DIR = 'img'
@@ -147,6 +156,49 @@ def find_asset(nas_system_dir, rom_name, kind='box_front', media_dir=None):
                 rel = os.path.join(md, base, v) if md else os.path.join(base, v)
                 return os.path.join(d, v), rel
     return None, None
+
+
+def find_video(nas_system_dir, rom_name, media_dir=None):
+    """在 NAS 上找某个游戏的**预览视频**，返回绝对路径或 None
+
+    路径推导与 find_asset 完全同源（`<系统>/media/<ROM 去扩展名>/`），
+    只是目标换成视频文件。
+
+    与封面不同的一条重要差别：**视频不复制到掌机**，商店详情页直接播
+    NAS 上的源文件（实测单个 2 MB / 29 秒 / h264 320x240，2.4G WiFi 直接
+    流播完全够用）。所以上面那段"为什么不做视频"的存储顾虑在这里不成立。
+
+    覆盖率实测（2026-10-12）：FC 520/520、GBA 465/465、SFC 355/355、
+    PSP 471/471、DC 104/104、GB 108/108、N64 70/70 —— 每个 media 子目录
+    都有 video，基本不会遇到"没有预览"。
+    """
+    if not nas_system_dir:
+        return None
+
+    cands = []
+    if media_dir:
+        cands.append(media_dir)
+    st = rom_stem(rom_name)
+    if st and st not in cands:
+        cands.append(st)
+
+    for base in cands:
+        for md in ('media', ''):
+            d = os.path.join(nas_system_dir, md, base) if md else os.path.join(nas_system_dir, base)
+            files = _listdir_ci(d)
+            if not files:
+                continue
+            # 1) 按候选名 + 扩展名精确找（大小写不敏感）
+            for stem in _VIDEO_STEMS:
+                for ext in _VIDEO_EXTS:
+                    hit = files.get(stem + ext)
+                    if hit:
+                        return os.path.join(d, hit)
+            # 2) 退一步：目录里任何视频文件
+            for k, v in sorted(files.items()):
+                if os.path.splitext(k)[1] in _VIDEO_EXTS:
+                    return os.path.join(d, v)
+    return None
 
 
 def _detect_layout(dir_path, sample=60):

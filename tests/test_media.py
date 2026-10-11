@@ -56,6 +56,27 @@ open(os.path.join(gba, 'media', 'Metroid', 'boxfront.jpg'), 'wb').write(b'\xff\x
 s, _ = M.find_asset(gba, 'Metroid.zip', 'box_front')
 check('小写 boxfront.jpg 命中', s is not None and s.endswith('boxfront.jpg'), s)
 
+print('== 3b. find_video（详情页按 X 播放的预览片源）==')
+v = M.find_video(fc, '1943.zip')
+check('找到 media/1943/video.mp4', v is not None and v.endswith('video.mp4'), v)
+check('返回绝对路径', v is not None and os.path.isabs(v), v)
+# 没视频的游戏返回 None（详情页据此提示"无预览"），不能抛异常
+open(os.path.join(fc, 'NoVideo.zip'), 'wb').write(b'x')
+check('没有视频返回 None', M.find_video(fc, 'NoVideo.zip') is None)
+# 扩展名/文件名大小写不敏感（真实 NAS 上 boxFront/video 混用大小写）
+os.makedirs(os.path.join(fc, 'media', 'CapsGame'))
+open(os.path.join(fc, 'CapsGame.zip'), 'wb').write(b'x')
+open(os.path.join(fc, 'media', 'CapsGame', 'Video.MP4'), 'wb').write(b'\x00' * 512)
+v2 = M.find_video(fc, 'CapsGame.zip')
+check('Video.MP4 大小写不敏感命中', v2 is not None and v2.endswith('Video.MP4'), v2)
+# 任意扩展名的视频也能兜住（不是每个包都叫 video.mp4）
+os.makedirs(os.path.join(fc, 'media', 'OddGame'))
+open(os.path.join(fc, 'media', 'OddGame', 'preview.webm'), 'wb').write(b'\x1aE\xdf\xa3')
+check('preview.webm 命中', (M.find_video(fc, 'OddGame.zip') or '').endswith('preview.webm'))
+# 健壮性
+check('系统目录不存在返回 None', M.find_video('/本机不存在的路径', 'x.zip') is None)
+check('空系统目录返回 None', M.find_video('', 'x.zip') is None)
+
 print('== 4. 没有 media/ 子目录时退化到裸目录 ==')
 fc2 = os.path.join(nas, 'SFC')
 os.makedirs(os.path.join(fc2, 'Mario'))

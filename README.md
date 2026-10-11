@@ -59,7 +59,7 @@ Roms/                        ← SMB 共享名
 
 ```bash
 # 在你的电脑上
-scp ark-romstore-0.4.1.tar.gz ark@<掌机IP>:/tmp/
+scp ark-romstore-0.4.2.tar.gz ark@<掌机IP>:/tmp/
 # 或 scp -r 整个 ark-romstore/ 目录
 ```
 
@@ -68,8 +68,8 @@ scp ark-romstore-0.4.1.tar.gz ark@<掌机IP>:/tmp/
 ```bash
 ssh ark@<掌机IP>
 cd /tmp
-tar xzf ark-romstore-0.4.1.tar.gz
-cd ark-romstore-0.4.1
+tar xzf ark-romstore-0.4.2.tar.gz
+cd ark-romstore-0.4.2
 
 # 先干跑一遍，只看环境够不够，不动任何文件
 sudo ./install.sh --check
@@ -139,9 +139,18 @@ sudo ./install.sh --host 10.168.1.100 --share Roms
 | 确认 / 进入 | `A` |
 | 返回 | `B` |
 | 上 / 下翻页 | `L1` / `R1` |
-| 安装 | `X` |
+| 安装（列表页） | `X` |
+| 安装（详情页） | `A` |
+| **播放预览（详情页）** | **`X`** |
 | 卸载 | `Y` |
 | **功能菜单** | **`Start`**（`Select` 等效） |
+
+**详情页按 `X` 播放预览视频**（0.4.2 新增）。NAS 上每个游戏的素材目录
+`<系统>/media/<ROM 名>/video.mp4` 就是它的过场演示，商店会直接串流播放，
+**不下载、不占本机空间**。播放时商店会先退出界面（EmulationStation 独占显示与音频设备），
+用 `mpv` 直出 DRM 播放；按 `B` 或播放结束会自动回到刚才那款游戏的详情页。
+
+> 底栏会标明当前游戏有没有片源：有片源显示「X 播放预览」，没有则显示「X 无预览」。
 
 **Start 菜单**里有三项：
 
@@ -362,7 +371,7 @@ sudo pkill -9 -f 'romstore/run[.]py'
 ## 八、卸载
 
 ```bash
-cd /tmp/ark-romstore-0.4.1
+cd /tmp/ark-romstore-0.4.2
 
 sudo ./uninstall.sh --check        # 先看会删什么
 sudo ./uninstall.sh                # 卸商店 + NAS 挂载服务，保留配置与索引

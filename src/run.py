@@ -7,6 +7,9 @@
 
 无头脚本模式（开发/远程验证，逐步导出界面截图）：
     python3 run.py --script "down,down,ok,down,ok" --dump /tmp/ui
+
+播放预览视频后的回跳（由 RomStore.sh 调用，一般不用手敲）：
+    python3 run.py --resume 1234      # 直接停在游戏 id=1234 的详情页
 """
 import os
 import sys
@@ -97,6 +100,7 @@ def display_test(seconds=2.0):
 def main(argv):
     dump = '/tmp/romstore-ui'
     script = None
+    resume = None
     size = (ui.W, ui.H)
     i = 1
     while i < len(argv):
@@ -105,6 +109,10 @@ def main(argv):
             return probe()
         if a == '--display-test':
             return display_test()
+        if a == '--resume' and i + 1 < len(argv):
+            resume = argv[i + 1]
+            i += 2
+            continue
         if a == '--script' and i + 1 < len(argv):
             script = argv[i + 1]
             i += 2
@@ -135,10 +143,15 @@ def main(argv):
 
     app = ui.App(size=size)
     try:
+        if resume is not None:
+            # 播完预览视频回来：直接落在原来那一款游戏的详情页上
+            ui.goto_game(app, resume)
         app.run()
     finally:
         app.close()
-    return 0
+    # App 可能带着"请求播放视频"的退出码退出（见 ui.EXIT_PLAY），
+    # 透传给外层 RomStore.sh，由它接手播放。
+    return app.exit_code
 
 
 if __name__ == '__main__':

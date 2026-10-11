@@ -460,6 +460,12 @@ chmod 755 "$ES_DIR/RomStore.sh"
 chown "$TARGET_UID:$TARGET_GID" "$ES_DIR/RomStore.sh"
 ok "$ES_DIR/RomStore.sh"
 
+# 0.4.2 早期版本装过一个独立的「视频播放器」入口，后来改成商店详情页里播放。
+# 升级时把旧入口清掉，免得 Options 里留一个已经没用的条目。
+if [ -e "$ES_DIR/VideoPlayer.sh" ]; then
+    rm -f "$ES_DIR/VideoPlayer.sh" && ok "已移除旧版独立入口 $ES_DIR/VideoPlayer.sh"
+fi
+
 render "$SRC/nas-roms-mount.sh" "$MOUNT_SCRIPT.new"
 chmod 755 "$MOUNT_SCRIPT.new"
 chown 0:0 "$MOUNT_SCRIPT.new"
@@ -604,6 +610,7 @@ head_ "⑬ 安装后自检"
 VERIFY_FAIL=0
 v_ok()   { printf '  %s✔%s %s\n' "$C_G" "$C_0" "$*"; }
 v_bad()  { printf '  %s✘%s %s\n' "$C_R" "$C_0" "$*"; VERIFY_FAIL=1; }
+v_warn() { printf '  %s!%s %s\n' "$C_Y" "$C_0" "$*"; }
 
 # 1) 程序本体
 if [ -r "$STORE_DIR/run.py" ] && [ -r "$STORE_DIR/romstore/ui.py" ]; then
@@ -636,6 +643,16 @@ if [ -f "$ES_DIR/gamelist.xml" ] && grep -q 'RomStore\.sh' "$ES_DIR/gamelist.xml
     v_ok "gamelist.xml 里有「ROM 商店」条目"
 else
     v_bad "gamelist.xml 里没找到入口条目"
+fi
+
+# 2b) 预览视频的依赖：详情页按 X 播放靠 mpv 直出 DRM
+if command -v mpv >/dev/null 2>&1; then
+    v_ok "mpv 可用（详情页预览视频）"
+else
+    v_warn "没找到 mpv —— 商店详情页按 X 无法播放预览视频"
+fi
+if [ -f "$ES_DIR/gamelist.xml" ] && grep -q 'VideoPlayer\.sh' "$ES_DIR/gamelist.xml"; then
+    v_warn "gamelist.xml 里还留着旧版「视频播放器」条目（--unregister 可清理）"
 fi
 
 # 3) 商店源

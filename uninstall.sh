@@ -107,7 +107,7 @@ fi
 
 if [ "$CHECK_ONLY" = "1" ]; then
     head_ "会被删除的内容"
-    for f in "$UNIT" "$DISPATCHER" "$MOUNT_SCRIPT" "$ES_DIR/RomStore.sh" "$ES_GUARD"; do
+    for f in "$UNIT" "$DISPATCHER" "$MOUNT_SCRIPT" "$ES_DIR/RomStore.sh" "$ES_DIR/VideoPlayer.sh" "$ES_GUARD"; do
         [ -e "$f" ] && say "  删 $f" || say "  · $f（不存在）"
     done
     if [ "$PURGE" = "1" ]; then
@@ -151,6 +151,14 @@ if [ -e "$ES_DIR/RomStore.sh" ]; then
     rm -f "$ES_DIR/RomStore.sh" && ok "已删除 $ES_DIR/RomStore.sh"
 else
     skip "$ES_DIR/RomStore.sh"
+fi
+
+# 旧版的独立「视频播放器」入口：0.4.2 早期装过，后来改成在商店详情页里播放。
+# 保留这段清理逻辑 —— 用老版本装过的人，卸载时也得能卸干净。
+if [ -e "$ES_DIR/VideoPlayer.sh" ]; then
+    rm -f "$ES_DIR/VideoPlayer.sh" && ok "已删除 $ES_DIR/VideoPlayer.sh"
+else
+    skip "$ES_DIR/VideoPlayer.sh"
 fi
 
 # ----------------------------------------------------------------- 3. 挂载服务
@@ -223,7 +231,7 @@ head_ "卸载完成"
 
 # 卸载后自检：确认真的干净了，避免「以为卸了其实还在」
 LEFT=0
-for f in "$UNIT" "$DISPATCHER" "$MOUNT_SCRIPT" "$ES_DIR/RomStore.sh"; do
+for f in "$UNIT" "$DISPATCHER" "$MOUNT_SCRIPT" "$ES_DIR/RomStore.sh" "$ES_DIR/VideoPlayer.sh"; do
     if [ -e "$f" ]; then
         printf '  %s✘%s 残留：%s\n' "$C_R" "$C_0" "$f"
         LEFT=1
@@ -231,6 +239,10 @@ for f in "$UNIT" "$DISPATCHER" "$MOUNT_SCRIPT" "$ES_DIR/RomStore.sh"; do
 done
 if [ -f "$ES_DIR/gamelist.xml" ] && grep -q 'RomStore\.sh' "$ES_DIR/gamelist.xml" 2>/dev/null; then
     printf '  %s✘%s 残留：%s 里仍有「ROM 商店」条目\n' "$C_R" "$C_0" "$ES_DIR/gamelist.xml"
+    LEFT=1
+fi
+if [ -f "$ES_DIR/gamelist.xml" ] && grep -q 'VideoPlayer\.sh' "$ES_DIR/gamelist.xml" 2>/dev/null; then
+    printf '  %s✘%s 残留：%s 里仍有「视频播放器」条目\n' "$C_R" "$C_0" "$ES_DIR/gamelist.xml"
     LEFT=1
 fi
 if [ "$KEEP_MOUNT" != "1" ] && mountpoint -q "$MOUNT_POINT" 2>/dev/null; then

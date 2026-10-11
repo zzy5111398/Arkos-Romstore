@@ -12,6 +12,13 @@
   X              安装          Y            卸载
   Start          菜单（重扫 NAS / 修改商店源 / 退出商店）
 
+注意 X 在**列表页**是安装、在**详情页**是「播放预览视频」—— 详情页的 A 才是安装。
+这样设计是因为详情页已经有封面预览，把"看动态预览"放在同一个位置上最顺手。
+
+预览视频怎么播（详情页按 X）：掌机没有 X11/Wayland，本进程又占着 KMS 显示，
+所以走的是「本进程退出 -> 外层 RomStore.sh 用 mpv DRM 直出播放 -> 重新拉起本进程
+并恢复到该游戏详情页」这条路。请求通过退出码 42 + 请求文件传递，见 request_play()。
+
 软键盘（screen='kb'，掌机没键盘，所有文本都靠它输入）：
   十字键/左摇杆  选字符       A            输入该字符
   Y              退格          X            完成
@@ -37,6 +44,15 @@ W, H = 640, 480
 HEADER_H = 52
 FOOTER_H = 44
 ROW_H = 30
+
+# ---- 「播放预览视频」的进程间协议 -------------------------------------------
+# 本进程占着 KMS/DRM 显示，没法在自己进程里解视频（掌机没有 python 解码器绑定），
+# 所以由外层 RomStore.sh 负责播放。约定：
+#   1. 退出码 EXIT_PLAY(42)
+#   2. 请求文件 PLAY_REQ 两行：第 1 行视频绝对路径，第 2 行游戏 id
+# RomStore.sh 见到 42 就播第 1 行那个文件，播完用 --resume <第 2 行> 把界面拉回来。
+EXIT_PLAY = 42
+PLAY_REQ = '/tmp/romstore-play.req'
 # 留 26px 给「当前位置 / 总数」指示条，避免与最后一行重叠
 VIS_ROWS = (H - HEADER_H - FOOTER_H - 26) // ROW_H
 
@@ -177,9 +193,11 @@ class App(object):
         self.worker = None
         self.worker_result = None
         self.running = True
+        self.exit_code = 0          # 非 0 时由 run.py 透传给外层 shell（见 EXIT_PLAY）
         self.conn = None
         self.desc_cache = {}
         self.installed_cache = {}
+        self.video_cache = {}       # 游戏 id -> 预览视频路径或 None（详情页每帧都要问）
 
         self._open_index()
 
@@ -497,6 +515,48 @@ class App(object):
         self.desc_cache[key] = d
         return d
 
+    def video_of(self, g):
+        """该游戏在 NAS 上的预览视频路径；没有就返回 None
+
+        结果按游戏 id 缓存 —— 详情页每帧都要问一次（底栏要显示"能不能播"），
+        而 find_video 要 listdir 一次 NAS 目录，每帧都做会明显卡顿。
+        """
+        key = g['id']
+        if key in self.video_cache:
+            return self.video_cache[key]
+        v = None
+        try:
+            v = media_mod.find_video(
+                os.path.join(config.NAS_ROOT, g['nas_dir']), g['rom_rel'] or '',
+                g['media_dir'] if 'media_dir' in g.keys() else None)
+        except Exception:
+            v = None
+        self.video_cache[key] = v
+        return v
+
+    def request_play(self):
+        """详情页按 X：播放该游戏的 NAS 预览视频
+
+        本进程占着 KMS 显示，没法在自己进程里放视频，所以走"退出 + 交给外层"：
+        写好请求文件后以 EXIT_PLAY 退出，RomStore.sh 会接手播 mpv 再把界面拉回来。
+        """
+        g = self.detail_game
+        if not g:
+            return
+        v = self.video_of(g)
+        if not v:
+            self.msg = {'text': '这款游戏没有预览视频。\n（按 A 仍可正常安装）',
+                        'color': WARN}
+            return
+        try:
+            with open(PLAY_REQ, 'w') as f:
+                f.write(v + '\n' + str(g['id']) + '\n')
+        except OSError as e:
+            self.msg = {'text': '无法写入播放请求：%s' % e, 'color': RED}
+            return
+        self.exit_code = EXIT_PLAY
+        self.running = False
+
     def render_detail(self):
         g = self.detail_game
         if not g:
@@ -561,8 +621,10 @@ class App(object):
             self.txt(ln, pad, y, TEXT_DIM, self.f_row)
             y += 22
         free = inst.human(inst.free_bytes(g['es_path']))
-        self.footer([('A/X', '安装'), ('Y', '卸载'), ('L1/R1', '滚动'), ('B', '返回'),
-                     ('Start', '菜单'), ('', '可用 ' + free)])
+        # 详情页的 X 不再是安装（那是 A），改成播预览视频 —— 底栏直接标出有没有片源
+        play_hint = '播放预览' if self.video_of(g) else '无预览'
+        self.footer([('A', '安装'), ('X', play_hint), ('Y', '卸载'),
+                     ('L1/R1', '滚动'), ('B', '返回'), ('', '可用 ' + free)])
 
     # ------------------------------------------------------------ 进度屏
     def render_progress(self):
@@ -1045,9 +1107,12 @@ class App(object):
         if act == 'back':
             self.screen = 'games'
             return
-        if act in ('ok', 'install'):
+        if act == 'ok':
             if self.detail_game:
                 self.start_install(self.detail_game)
+            return
+        if act == 'install':        # X：详情页里是播预览视频（列表页的 X 才是安装）
+            self.request_play()
             return
         if act == 'delete':
             if self.detail_game:
@@ -1138,25 +1203,43 @@ def run_script(actions, dumpdir, size=(W, H)):
     return out
 
 
-def _goto_game(app, gid):
-    """把 app 直接切到某个游戏 id 的详情页（无头验证用）"""
+def goto_game(app, gid):
+    """把 app 直接切到某个游戏 id 的详情页。成功返回 True
+
+    两个用途：
+      1. 无头脚本模式的 `goto:<id>`（远程验证界面，不用靠上下翻找）
+      2. 播完预览视频后，RomStore.sh 用 `run.py --resume <id>` 把界面恢复
+         到刚才那一页 —— 否则每看一次预览就被打回最外层列表，体验很差
+    """
     try:
         gid = int(gid)
-    except ValueError:
-        return
+    except (TypeError, ValueError):
+        return False
     try:
         g = idx.get_game(app.conn, gid)
     except Exception:
         g = None
     if not g:
-        return
+        return False
     # 让当前系统/列表也指到它，返回时不会跳到别的系统
     for i, s in enumerate(app.sys_rows):
         if s['nas_dir'] == g['nas_dir']:
             app.sys_sel = i
             break
     app.load_games()
+    # 列表光标也对齐到它，之后按 B 退回列表时正好停在这一款上
+    for i, gg in enumerate(app.games):
+        if gg['id'] == g['id']:
+            app.game_sel = i
+            if i >= VIS_ROWS:
+                app.game_top = i - VIS_ROWS + 1
+            break
     app.detail_game = g
     app.detail_desc = app.load_desc(g)
     app.detail_scroll = 0
     app.screen = 'detail'
+    return True
+
+
+# 旧名保留（无头脚本模式一路这么叫过来的）
+_goto_game = goto_game

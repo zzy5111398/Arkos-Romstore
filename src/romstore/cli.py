@@ -623,11 +623,19 @@ def cmd_register(undo=False):
     路径必须是 './RomStore.sh' 而不是 './Tools/RomStore.sh'：
     es_systems.cfg 里 options 系统的 <path> 是 /opt/system/，
     RomStore.sh 就直接放在 /opt/system/ 下（rootfs，换 SD 卡不丢）。
+
+    注：0.4.2 曾短暂加过一个独立的 VideoPlayer.sh 入口，已撤掉 ——
+    播放预览视频改在商店详情页里（见 ui.request_play 与 RomStore.sh 的接力循环）。
+    entries 保留成列表是为了以后加入口时不用改撤销逻辑。
     """
     es_path = config.ES_OPTIONS_DIR
     gl = os.path.join(es_path, 'gamelist.xml')
-    entry = {'rom_name': 'RomStore.sh', 'title': 'ROM 商店',
-             'desc': '从局域网 NAS 浏览并安装游戏到本机'}
+
+    entries = [
+        {'rom_name': 'RomStore.sh', 'title': 'ROM 商店',
+         'desc': '从局域网 NAS 浏览并安装游戏到本机'},
+    ]
+
     bak = gl + '.romstore.bak'
     if not os.path.exists(bak) and os.path.exists(gl):
         import shutil
@@ -642,22 +650,27 @@ def cmd_register(undo=False):
             raw = f.read()
         bom = raw.startswith(b'\xef\xbb\xbf')
         text = raw.decode('utf-8-sig', 'replace')
-        hit = inst._find_block(text, entry['rom_name'])
-        if not hit:
+        removed = 0
+        for entry in entries:
+            hit = inst._find_block(text, entry['rom_name'])
+            if not hit:
+                continue
+            s, en, _b = hit
+            while s > 0 and text[s - 1] in ' \t':
+                s -= 1
+            text = text[:s] + text[en:]
+            removed += 1
+        if not removed:
             print('未找到已注册的条目，无需撤销')
             return 0
-        s, en, _b = hit
-        while s > 0 and text[s - 1] in ' \t':
-            s -= 1
-        new = text[:s] + text[en:]
         with open(gl, 'wb') as f:
             if bom:
                 f.write(b'\xef\xbb\xbf')
-            f.write(new.encode('utf-8'))
-        print('已撤销注册条目')
+            f.write(text.encode('utf-8'))
+        print('已撤销 %d 个注册条目' % removed)
         return 0
 
-    added, updated, path = inst.upsert_gamelist(es_path, [entry])
+    added, updated, path = inst.upsert_gamelist(es_path, entries)
     print('注册完成: %s（新增 %d / 更新 %d）' % (path, added, updated))
     with open(path, 'rb') as f:
         print(f.read().decode('utf-8-sig'))
