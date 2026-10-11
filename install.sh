@@ -50,6 +50,10 @@ UNIT="/etc/systemd/system/nas-roms.service"
 DISPATCHER="/etc/NetworkManager/dispatcher.d/50-nas-roms"
 MOUNT_POINT="/mnt/Roms"
 
+# /roms 只读自愈
+HEAL_SH="/opt/system/roms-fs-selfheal.sh"
+HEAL_UNIT="/etc/systemd/system/roms-fs-selfheal.service"
+
 # ----------------------------------------------------------------- 输出
 if [ -t 1 ]; then
     C_R=$'\033[31m'; C_G=$'\033[32m'; C_Y=$'\033[33m'
@@ -523,6 +527,17 @@ head_ "⑧ 挂载服务（systemd）"
 install -m 644 "$SYSD/nas-roms.service" "$UNIT"
 ok "$UNIT"
 
+# /roms 只读自愈：exFAT 无 journal，掉电会截断 FAT 表导致整盘只读（Errno 30）
+if [ -r "$SRCD/systemd/roms-fs-selfheal.sh" ] && [ -r "$SYSD/roms-fs-selfheal.service" ]; then
+    bak "$HEAL_SH" "$BAK_DIR/roms-fs-selfheal.sh"
+    bak "$HEAL_UNIT" "$BAK_DIR/roms-fs-selfheal.service"
+    install -m 755 "$SRCD/systemd/roms-fs-selfheal.sh" "$HEAL_SH"
+    install -m 644 "$SYSD/roms-fs-selfheal.service" "$HEAL_UNIT"
+    ok "只读自愈：$HEAL_SH"
+else
+    warn "分发包缺少自愈脚本，跳过（不影响主功能）"
+fi
+
 if [ -r "$SYSD/50-nas-roms" ]; then
     if [ -d /etc/NetworkManager ]; then
         install -m 755 -o root -g root "$SYSD/50-nas-roms" "$DISPATCHER"
@@ -537,6 +552,15 @@ if systemctl enable nas-roms.service >/dev/null 2>&1; then
     ok "已设为开机自启"
 else
     warn "enable 失败，可稍后手动：systemctl enable nas-roms"
+fi
+
+# 自愈服务是可选增强，装不上也不该让安装失败
+if [ -f "$HEAL_UNIT" ]; then
+    if systemctl enable roms-fs-selfheal.service >/dev/null 2>&1; then
+        ok "roms-fs-selfheal.service 已设为开机自启（掉电只读自动修复）"
+    else
+        warn "自愈服务 enable 失败，可稍后手动：systemctl enable roms-fs-selfheal"
+    fi
 fi
 
 # ----------------------------------------------------------------- 9. ES 崩溃保护（可选）
@@ -681,6 +705,17 @@ if systemctl is-enabled nas-roms.service >/dev/null 2>&1; then
     v_ok "nas-roms.service 开机自启已启用"
 else
     v_bad "nas-roms.service 未启用开机自启"
+fi
+
+# 6b) /roms 只读自愈（可选增强，缺了只是打回原形，不算故障）
+if [ -f "$HEAL_SH" ] && command -v fsck.exfat >/dev/null 2>&1; then
+    if systemctl is-enabled roms-fs-selfheal.service >/dev/null 2>&1; then
+        v_ok "roms-fs-selfheal.service 已启用（掉电只读自动修复）"
+    else
+        v_warn "roms-fs-selfheal.service 未启用，可手动：systemctl enable roms-fs-selfheal"
+    fi
+else
+    v_warn "未安装 /roms 只读自愈（或系统无 fsck.exfat）—— 掉电后需手工 fsck"
 fi
 
 # 7) 图形环境（无头探针，不占屏）

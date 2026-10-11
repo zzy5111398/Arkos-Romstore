@@ -26,6 +26,8 @@ TARGET_GID=""
 
 MOUNT_SCRIPT="/usr/local/sbin/nas-roms-mount.sh"
 UNIT="/etc/systemd/system/nas-roms.service"
+HEAL_SH="/opt/system/roms-fs-selfheal.sh"
+HEAL_UNIT="/etc/systemd/system/roms-fs-selfheal.service"
 DISPATCHER="/etc/NetworkManager/dispatcher.d/50-nas-roms"
 MOUNT_POINT="/mnt/Roms"
 ES_GUARD="/etc/systemd/system/emulationstation.service.d/10-crash-limit.conf"
@@ -107,7 +109,7 @@ fi
 
 if [ "$CHECK_ONLY" = "1" ]; then
     head_ "会被删除的内容"
-    for f in "$UNIT" "$DISPATCHER" "$MOUNT_SCRIPT" "$ES_DIR/RomStore.sh" "$ES_DIR/VideoPlayer.sh" "$ES_GUARD"; do
+    for f in "$UNIT" "$DISPATCHER" "$MOUNT_SCRIPT" "$ES_DIR/RomStore.sh" "$ES_DIR/VideoPlayer.sh" "$ES_GUARD" "$HEAL_UNIT" "$HEAL_SH"; do
         [ -e "$f" ] && say "  删 $f" || say "  · $f（不存在）"
     done
     if [ "$PURGE" = "1" ]; then
@@ -165,6 +167,7 @@ fi
 if [ "$KEEP_MOUNT" = "1" ]; then
     head_ "③ 挂载服务"
     say "  --keep-mount：保留 $MOUNT_SCRIPT 与 $UNIT"
+    say "  （注：$HEAL_UNIT / $HEAL_SH 属于机器维护，始终会清理）"
 else
     head_ "③ 移除挂载服务"
     if [ -e "$MOUNT_SCRIPT.orig-bak" ]; then
@@ -187,6 +190,16 @@ else
         rm -f "$DISPATCHER" && ok "已删除 $DISPATCHER"
     else
         skip "$DISPATCHER"
+    fi
+
+    # 只读自愈：属于机器维护而非 ROM 商店本体，即使 --keep-mount 也要清掉
+    if [ -e "$HEAL_UNIT" ] || [ -e "$HEAL_SH" ]; then
+        systemctl disable roms-fs-selfheal.service >/dev/null 2>&1 || true
+        rm -f "$HEAL_UNIT" "$HEAL_SH"
+        ok "已删除 /roms 只读自愈"
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    else
+        skip "$HEAL_UNIT"
     fi
     systemctl daemon-reload
 
@@ -231,7 +244,7 @@ head_ "卸载完成"
 
 # 卸载后自检：确认真的干净了，避免「以为卸了其实还在」
 LEFT=0
-for f in "$UNIT" "$DISPATCHER" "$MOUNT_SCRIPT" "$ES_DIR/RomStore.sh" "$ES_DIR/VideoPlayer.sh"; do
+for f in "$UNIT" "$DISPATCHER" "$MOUNT_SCRIPT" "$ES_DIR/RomStore.sh" "$ES_DIR/VideoPlayer.sh" "$HEAL_UNIT" "$HEAL_SH"; do
     if [ -e "$f" ]; then
         printf '  %s✘%s 残留：%s\n' "$C_R" "$C_0" "$f"
         LEFT=1

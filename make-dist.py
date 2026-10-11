@@ -202,7 +202,9 @@ def main(argv=None):
             'src/run.py', 'src/RomStore.sh', 'src/nas-roms-mount.sh',
             'src/romstore/ui.py', 'src/romstore/media.py',
             'src/romstore/batchmedia.py',
-            'systemd/nas-roms.service']
+            'systemd/nas-roms.service',
+            'systemd/roms-fs-selfheal.service',
+            'src/systemd/roms-fs-selfheal.sh']
     have = {rel.as_posix() for _, rel, _ in items}
     missing = [n for n in need if n not in have]
     if missing:

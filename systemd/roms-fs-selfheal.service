@@ -1,0 +1,29 @@
+[Unit]
+Description=Self-heal /roms exFAT filesystem if read-only
+Documentation=man:fsck.exfat(8)
+# 必须在 ES 之前跑完：ES 开机就要遍历 /roms 读 gamelist。
+# 但不能拿 ES 当硬依赖 —— 万一 ES 没起来，自愈也仍要执行。
+After=systemd-remount-fs.service local-fs.target
+Before=emulationstation.service nas-roms.service
+Wants=roms.mount
+# 只在 p3 出现时才尝试（分区没了就直接跳过，不报错）
+ConditionPathExists=/dev/mmcblk0p3
+
+[Service]
+# 注意：不能用 RemainAfterExit=yes / Restart=
+# systemd 会把「已执行过」的 oneshot 记为 active，此后 start 直接跳过不再运行 —— 
+# 而本脚本的用途恰恰是「需要时手动再触发」，开机那次执行完就该退出状态。
+# 只在开机时靠 WantedBy=multi-user.target 拉一次；重复执行由脚本内的 flock 防并发。
+Type=oneshot
+ExecStart=/opt/system/roms-fs-selfheal.sh
+# 三重保险：脚本本身所有路径都 exit 0，这里再兜一层。
+# 自愈失败绝不能把开机卡死 —— 宁可带着只读分区进桌面。
+SuccessExitStatus=0
+TimeoutStartSec=900
+
+# 只有真正需要 fsck 的大约 30 秒会消耗 CPU（此时还没进桌面，无感）
+CPUWeight=10
+IOWeight=10
+
+[Install]
+WantedBy=multi-user.target
