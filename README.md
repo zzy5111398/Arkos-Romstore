@@ -28,7 +28,11 @@
 Roms/                        ← SMB 共享名
 ├── FC/
 │   ├── metadata.pegasus.txt ← 必须，游戏清单
-│   ├── img/                 ← 封面等素材（本版不下发，仅备用）
+│   ├── media/               ← 封面等素材（安装时按 media/<游戏名>/ 自动导入）
+│   │   └── 1943/
+│   │       ├── boxFront.jpg ← 封面（拿这个）
+│   │       ├── logo.png
+│   │       └── video.mp4    ← 本版不下发（见第九节）
 │   ├── 超级马里奥.nes
 │   └── ...
 ├── PSP/
@@ -55,7 +59,7 @@ Roms/                        ← SMB 共享名
 
 ```bash
 # 在你的电脑上
-scp ark-romstore-0.3.0.tar.gz ark@<掌机IP>:/tmp/
+scp ark-romstore-0.4.1.tar.gz ark@<掌机IP>:/tmp/
 # 或 scp -r 整个 ark-romstore/ 目录
 ```
 
@@ -64,8 +68,8 @@ scp ark-romstore-0.3.0.tar.gz ark@<掌机IP>:/tmp/
 ```bash
 ssh ark@<掌机IP>
 cd /tmp
-tar xzf ark-romstore-0.3.0.tar.gz
-cd ark-romstore-0.3.0
+tar xzf ark-romstore-0.4.1.tar.gz
+cd ark-romstore-0.4.1
 
 # 先干跑一遍，只看环境够不够，不动任何文件
 sudo ./install.sh --check
@@ -73,6 +77,11 @@ sudo ./install.sh --check
 # 正式安装（把 NAS 地址和共享名填上）
 sudo ./install.sh --host 10.168.1.100 --share Roms
 ```
+
+> 缺依赖（最常见是 `cifs-utils`）时安装器会**自动 `apt-get` 补装**，
+> 不必自己上去敲。想让它只报错不动手，加 `--no-auto-apt`。
+> `--check` 是干跑，一律不补装。
+
 
 > 若提示 `Permission denied`（从 Windows 解压、或经 U 盘拷贝时常见，
 > 可执行位丢了），改用 `sudo bash install.sh ...` 即可，不用先 `chmod`。
@@ -89,15 +98,22 @@ sudo ./install.sh --host 10.168.1.100 --share Roms \
 
 安装器会做这些事，每一步都会打印结果：
 
-1. 检查依赖（python3 / mount.cifs / flock / nc / SDL2 / SDL2_ttf / 中文字体）
-   —— **不满足就先停下**，不会装一半
-2. 备份会被覆盖的文件到 `~/.romstore/backup/<时间戳>/`
-3. 装程序到 `~/.romstore/`，入口脚本到 ES 的 options 目录
-4. 生成挂载脚本到 `/usr/local/sbin/nas-roms-mount.sh`
-5. 写 `source.json`（密码不进命令行，走环境变量）
-6. 装并启用 `nas-roms.service`（开机自动挂 NAS）+ NetworkManager dispatcher
-7. 挂载 NAS、建索引（首次约 10–15 秒）
-8. 注册 EmulationStation 入口
+1. 定位目标用户；**没给 `--es-dir` 时自动从 `es_systems.cfg` 探测 options 目录**
+2. 检查依赖（python3 / mount.cifs / flock / nc / SDL2 / SDL2_ttf / 中文字体 /
+   **内核 cifs 支持**）—— 可自动补装的缺项会**自己 `apt-get` 装上**，
+   内核不支持这类没法补的才停下
+3. 备份会被覆盖的文件到 `~/.romstore/backup/<时间戳>/`（全新安装会说"无旧文件"）
+4. 装程序到 `~/.romstore/`，入口脚本到 ES 的 options 目录
+5. 生成挂载脚本到 `/usr/local/sbin/nas-roms-mount.sh`
+6. 写 `source.json`（密码不进命令行，走环境变量）
+7. 装并启用 `nas-roms.service`（开机自动挂 NAS）+ NetworkManager dispatcher
+8. 挂载 NAS、建索引（首次约 10–15 秒）
+9. 注册 EmulationStation 入口
+10. **安装后自检**：程序本体 / 入口脚本 / gamelist 条目 / `source.json` /
+    挂载 / 索引 / 开机自启 + 一次无头探针（SDL / 手柄 / 中文字体），
+    最后给出「全部通过」或「N 项未通过」
+
+> `--check` 是干跑：只做第 2 步的检查，不写任何文件、也不补装依赖。
 
 ### 3. 升级
 
@@ -206,7 +222,8 @@ python3 -m romstore.cli --umount
 
 # 安装 / 卸载（无界面）
 python3 -m romstore.cli --install <game_id> --dry-run
-python3 -m romstore.cli --install <game_id>
+python3 -m romstore.cli --install <game_id>          # 连封面一起导入
+python3 -m romstore.cli --install <game_id> --no-media   # 只装 ROM，跳过封面
 python3 -m romstore.cli --remove <game_id>
 
 # ES 入口
@@ -345,7 +362,7 @@ sudo pkill -9 -f 'romstore/run[.]py'
 ## 八、卸载
 
 ```bash
-cd /tmp/ark-romstore-0.3.0
+cd /tmp/ark-romstore-0.4.1
 
 sudo ./uninstall.sh --check        # 先看会删什么
 sudo ./uninstall.sh                # 卸商店 + NAS 挂载服务，保留配置与索引
@@ -353,14 +370,23 @@ sudo ./uninstall.sh --keep-mount   # 只卸商店，保留 /mnt/Roms 挂载
 sudo ./uninstall.sh --purge        # 连索引/配置/日志/备份一起删
 ```
 
+卸完会**自动自检**是否有残留（文件 / 挂载 / 菜单条目），逐条列出。
+
 **已下载的游戏文件不受影响** —— 它们在 `/roms/` 下，卸载脚本不碰。
 
 ---
 
 ## 九、已知边界
 
-- **只下 ROM，不下封面/logo/视频**。装完的游戏在 ES 里暂时没图；
-  NAS 上素材是齐的，属于下一步（P2）要做的事。
+- **封面/logo 会自动导入**（0.4.0 起，0.4.1 修正布局）。装完的游戏在 ES 里就有图：
+  NAS 上 `media/<游戏名>/boxFront.jpg` 会被复制过来并写进 gamelist 的 `<image>`。
+  **掌机上素材有两套布局，程序会先探测再按同款写**（见下方「刮削素材布局」）：
+  - 散文件式：`/roms/nes/img/1943.png`
+  - 每游戏子目录式：`/roms/gba/media/黄金太阳/boxfront.png`
+
+  **视频（`video.mp4`）不下发** —— 单张 2 MB、SD 写速只有 4.8 MB/s，
+  `/roms` 又只剩十几 G，留待按需选装。
+  没有封面的游戏静默跳过，**不算安装失败**。想只装 ROM 可用 `--no-media`。
 - **卸载回收站不会自动清理**，需要手动删 `/roms/.romstore-trash/`。
 - **账号密码走明文 NTLM**（SMB 2.1 协议使然），家用局域网够用，
   **不要暴露到公网**。
@@ -384,6 +410,7 @@ ark-romstore/
 ├── README.md            本文件
 ├── VERSION              版本号
 ├── CHANGELOG.md         更新日志
+├── RELEASE-NOTES.md     版本说明（装机前先看这份）
 ├── install.sh           一键安装 / 升级
 ├── uninstall.sh         卸载
 ├── make-dist.py         打包成 tar.gz / zip（维护者用）
@@ -395,10 +422,11 @@ ark-romstore/
 │       ├── config.py       路径常量
 │       ├── mapp.py         NAS 目录 → ES 系统 映射表（68 条，含置信度）
 │       ├── meta.py         Pegasus metadata 解析
+│       ├── media.py        刮削素材（封面）路径推导与复制
 │       ├── index.py        L1 索引 + 指纹增量
-│       ├── install.py      空间预检 + 流式复制 + gamelist 文本级 upsert
+│       ├── install.py      空间预检 + 流式复制 + 封面导入 + gamelist 文本级 upsert
 │       ├── source.py       商店源读写 / 主机扫描 / 挂载
-│       ├── sdl.py          SDL2 的 ctypes 绑定
+│       ├── sdl.py          SDL2 的 ctypes 绑定（含封面缩略图缓存）
 │       ├── ui.py           界面
 │       └── cli.py          无头命令行
 ├── systemd/
@@ -420,6 +448,14 @@ cd ark-romstore
 python3 make-dist.py --list      # 先看会打哪些文件、各自的权限位
 python3 make-dist.py             # 产出 ../ark-romstore-<版本>.tar.gz 与 .zip
 python3 make-dist.py -o /tmp/d   # 指定输出目录
+python3 make-dist.py --epoch 1750000000   # 可复现构建（固定所有时间戳）
+```
+
+输出目录里还会生成 `SHA256SUMS`（对应 tar.gz 与 zip）。
+它**不能**放进包里 —— 那样哈希会自我引用。验证：
+
+```bash
+sha256sum -c SHA256SUMS
 ```
 
 打包脚本只做三件事，但每件都踩过：
@@ -432,6 +468,12 @@ python3 make-dist.py -o /tmp/d   # 指定输出目录
    zip 侧还额外设了 `create_system=3`，否则解压方不认 `external_attr` 里的权限。
 3. **排除 `__pycache__` / `*.pyc`** —— 那是打包机的 Python 版本产物，
    掌机是 Python 3.7，带过去既没用又可能让人误判。
+
+`--epoch` 要同时钉住**两层**时间戳：tar 条目的 mtime，以及 **gzip 容器头部
+的 mtime**。后者最容易被漏——`tarfile.open(mode='w:gz')` 内部用
+`time.time()` 且不接受 mtime 参数，背靠背跑两次常常落在同一秒，
+于是「md5 一致」是巧合而非可复现。脚本里是自己套一层 `GzipFile` 传
+`mtime` 解决的。
 
 打之前脚本会自检：必备文件在不在、两个模板里的 `@@STORE_DIR@@`
 占位符还在不在（缺了说明模板被误渲染过）。

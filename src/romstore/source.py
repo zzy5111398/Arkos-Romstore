@@ -213,6 +213,8 @@ _HINTS = [
     ('already mounted', '挂载点已被占用'),
     ('invalid argument', '挂载参数不被支持（本机内核 cifs 只认 vers=2.1）'),
     ('operation not permitted', '操作被拒绝 —— 检查 sudo 免密是否仍然有效'),
+    ('helper program', '缺 mount.cifs —— 在掌机上执行：apt-get install cifs-utils'),
+    ('eopnotsupp', '内核不支持该挂载参数（本机 cifs 只认 vers=2.1）'),
 ]
 
 _CODE_HINTS = {

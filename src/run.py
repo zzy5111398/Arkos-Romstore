@@ -58,6 +58,19 @@ def probe():
     print('索引数据库    : %s  %s'
           % (config.DB_PATH,
              '存在' if os.path.exists(config.DB_PATH) else '不存在'))
+
+    # 封面预览依赖 SDL_image 解码 jpg/png + libSDL2 的 SDL_BlitScaled 缩放。
+    # 实测 r36s 的 libSDL2 里**没有 SDL_BlitScaled** —— 此时自动走纯 Python
+    # 最近邻缩放（慢一点但可用），不会拖崩程序。
+    try:
+        b.img.IMG_Load
+        print('SDL_image     : OK（封面可解码）')
+    except (AttributeError, OSError) as e:
+        print('SDL_image     : 不可用 -> %s（详情页不显示封面缩略图）' % e)
+    if getattr(b, 'has_blitscaled', False):
+        print('封面缩放      : SDL_BlitScaled（原生，快）')
+    else:
+        print('封面缩放      : 纯 Python 最近邻（本机 libSDL2 缺 SDL_BlitScaled）')
     return 0
 
 

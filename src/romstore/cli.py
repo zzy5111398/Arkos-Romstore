@@ -10,6 +10,9 @@
   python3 -m romstore.cli --search 马里奥 [--limit 20]
   python3 -m romstore.cli --detail <game_id>
   python3 -m romstore.cli --install <game_id> [--dry-run]
+  python3 -m romstore.cli --gaps                    哪些系统缺封面
+  python3 -m romstore.cli --import-media GBA [--dry-run] [--media-limit N]
+                                                    批量补某个系统的封面
 
 商店源（NAS 共享）：
   python3 -m romstore.cli --source-show          当前源配置 + 挂载状态
@@ -25,6 +28,7 @@ import sys
 import time
 
 from . import config
+from . import batchmedia
 from . import index as idx
 from . import install as inst
 from . import mapp
@@ -193,7 +197,7 @@ def cmd_detail(gid):
     return 0
 
 
-def cmd_install(gid, dry):
+def cmd_install(gid, dry, media=True):
     conn = idx.connect()
     g = idx.get_game(conn, gid)
     if not g:
@@ -212,7 +216,7 @@ def cmd_install(gid, dry):
             sys.stderr.flush()
             last[0] = s
 
-    r = inst.install(conn, g, progress=cb, dry_run=dry)
+    r = inst.install(conn, g, progress=cb, dry_run=dry, copy_media=media)
     sys.stderr.write('\n')
     print('耗时 %.3f 秒' % (time.time() - t0))
     if not r['ok']:
@@ -226,9 +230,163 @@ def cmd_install(gid, dry):
         print('  ROM %d 个 / %s' % (r['files'], inst.human(r['bytes'])))
         if r.get('m3u'):
             print('  m3u: %s' % r['m3u'])
+        art = r.get('art') or {}
+        if art.get('ok'):
+            print('  封面: %s (%s)' % (r.get('image'), inst.human(art.get('bytes'))))
+        elif media:
+            print('  封面: 未导入（%s）' % (art.get('reason') or '未知原因'))
         print('  gamelist: %s（新增 %d / 更新 %d）'
               % (r['gamelist'], r['gamelist_added'], r['gamelist_updated']))
     conn.close()
+    return 0
+
+
+def cmd_gaps():
+    """体检：哪些系统已经装了游戏、但掌机上缺封面"""
+    rows = batchmedia.systems_with_gaps()
+    if not rows:
+        print('没有发现缺封面的系统（或 NAS 未挂载）')
+        return 0
+    print('%-14s %-16s %8s %8s %8s %10s' %
+          ('NAS目录', 'ES名', '已装', '缺图', '已有', '需传输'))
+    tot_b = 0
+    for r in rows:
+        tot_b += r['bytes']
+        print('%-14s %-16s %8d %8d %8d %10s' %
+              (r['nas_dir'], r['es_name'], r['installed'],
+               r['missing'], r['have'], inst.human(r['bytes'])))
+    print('-' * 70)
+    print('合计 %d 个系统，需传输 %s' % (len(rows), inst.human(tot_b)))
+    print('（用 --import-media <NAS目录> 逐个补）')
+    return 0
+
+
+def cmd_import_media(nas_dir, dry, limit, update_gamelist=True):
+    print('批量导入封面: %s' % nas_dir)
+    t0 = time.time()
+    last = ['']
+
+    def cb(phase, done, total, msg):
+        s = '\r  %-9s %d/%d  %s' % (phase, done, total, msg[:30])
+        if s != last[0]:
+            sys.stderr.write(s)
+            sys.stderr.flush()
+            last[0] = s
+
+    r = batchmedia.run(nas_dir, progress=cb, dry_run=dry, limit=limit,
+                       update_gamelist=update_gamelist)
+    sys.stderr.write('\n')
+    if not r['ok']:
+        print('失败: %s' % r['error'])
+        return 1
+    if r.get('dry_run'):
+        p = r['plan']
+        print('干跑：ES 目录 %s' % p['es_path'])
+        print('  布局: %s / %s' % (p['media_dir'], p['layout']))
+        print('  待导入 %d 个 / %s（跳过已有 %d，无封面 %d）'
+              % (r['todo'], inst.human(r['bytes']), p['counts']['skip'],
+                 p['counts']['nocover']))
+        if p['items']:
+            ex = next((i for i in p['items'] if i['action'] == 'copy'), None)
+            if ex:
+                print('  样例: %s' % ex['title'])
+                print('    %s' % ex['src'])
+                print('    -> %s' % ex['dst'])
+                print('    gamelist: <image>%s</image>' % ex['gl_path'])
+        print('  gamelist: %s' % ('会更新' if r['will_gamelist'] else '不动'))
+        return 0
+    print('完成：耗时 %.1f 秒' % (time.time() - t0))
+    print('  导入 %d 个封面 / %s' % (r['copied'], inst.human(r['bytes'])))
+    print('  跳过已有 %d 个，NAS 无封面 %d 个，失败 %d 个'
+          % (r['skipped'], r['nocover'], r['failed']))
+    print('  布局: %s / %s' % (r['media_dir'], r['layout']))
+    print('  gamelist: 新增 %d / 更新 %d' % (r['gamelist_added'],
+                                             r['gamelist_updated']))
+    if r.get('case_fixed'):
+        print('  顺带修正大小写路径 %d 条（NAS 与掌机文件名大小写不一致）'
+              % r['case_fixed'])
+    return 0
+
+
+def cmd_covers(nas_dir, check_content, sample, verbose):
+    """封面三层体检：引用层 / 内容层 / 生效层"""
+    import sys as _sys
+    last = ['']
+    multi = not nas_dir
+
+    def _cb(done, total, name):
+        if not multi:
+            return
+        s = '\r  体检中 %d/%d  %-28s' % (done, total, name[:28])
+        if s != last[0]:
+            _sys.stderr.write(s)
+            _sys.stderr.flush()
+            last[0] = s
+
+    r = batchmedia.audit(nas_dir, check_content=check_content,
+                         content_sample=sample, progress=_cb)
+    if multi and last[0]:
+        _sys.stderr.write('\n')
+    if r.get('error'):
+        print('失败: %s' % r['error'])
+        return 1
+    rows = r['systems']
+    if not rows:
+        print('没有可检查的系统（NAS 挂了吗？gamelist 都没有？）')
+        return 1
+    print('%-12s %-14s %7s %7s %7s %7s %7s' %
+          ('NAS目录', 'ES名', '游戏', '图引用', '存在', '缺失', '内容坏'))
+    print('-' * 66)
+    for s in rows:
+        print('%-12s %-14s %7d %7d %7d %7d %7d' %
+              (s['nas_dir'], s['es_name'], s['games'], s['img_refs'],
+               s['img_ok'], s['img_missing'], s['bad_content']))
+    t = r['totals']
+    print('-' * 66)
+    print('合计 %d 个系统 / %d 个 game：图引用 %d，存在 %d，缺失 %d，内容坏 %d'
+          % (t['systems'], t['games'], t['img_refs'], t['img_ok'],
+             t['img_missing'], t['bad_content']))
+    if t['img_missing'] == 0 and t['bad_content'] == 0:
+        print('✅ 引用层与内容层全部正常')
+    else:
+        print('⚠️  有缺失或内容损坏，见下')
+
+    if verbose:
+        for s in rows:
+            if s['broken']:
+                print()
+                print('[%s] 缺失样例:' % s['nas_dir'])
+                for b in s['broken']:
+                    print('  游戏 %s' % b['rom'])
+                    print('    引用 %s' % b['image'])
+
+    # 生效层
+    es = r.get('es') or {}
+    print()
+    print('— ES 生效层 —')
+    if es.get('exists'):
+        import time as _t
+        if es.get('proc_start'):
+            print('  ES 进程启动:          %s'
+                  % _t.strftime('%Y-%m-%d %H:%M:%S',
+                                _t.localtime(es['proc_start'])))
+        print('  imagecache.db 最后更新: %s'
+              % _t.strftime('%Y-%m-%d %H:%M:%S',
+                            _t.localtime(es.get('mtime') or 0)))
+        print('  缓存条目 %d（其中已解码 %d）'
+              % (es.get('entries', 0), es.get('decoded', 0)))
+        if es.get('gamelist_newest'):
+            print('  gamelist 最后更新:    %s'
+                  % _t.strftime('%Y-%m-%d %H:%M:%S',
+                                _t.localtime(es['gamelist_newest'])))
+        if es.get('stale'):
+            print('  ⚠️  gamelist 比 ES 重读时间新 —— 封面不会显示！')
+            print('     修：touch /tmp/es-restart && kill $(pidof emulationstation)')
+        else:
+            print('  ✅ ES 已在 gamelist 修改后重读过（启动时间/缓存不旧）')
+        print('  注：imagecache 只缓存「当前浏览到」的系统，条目少属正常')
+    else:
+        print('  没找到 %s（这台不是掌机？或 ES 没跑过？）' % es.get('cache_path'))
     return 0
 
 
@@ -244,6 +402,22 @@ def main(argv=None):
     ap.add_argument('--limit', type=int, default=20)
     ap.add_argument('--detail', type=int, metavar='GID')
     ap.add_argument('--install', type=int, metavar='GID')
+    ap.add_argument('--import-media', metavar='NAS_DIR',
+                    help='批量补某个系统已装游戏的封面')
+    ap.add_argument('--media-limit', type=int, default=0, metavar='N',
+                    help='配合 --import-media：只导前 N 个（0 = 不限，默认）')
+    ap.add_argument('--no-gamelist', action='store_true',
+                    help='配合 --import-media：只搬图，不改 gamelist')
+    ap.add_argument('--gaps', action='store_true',
+                    help='列出缺封面的系统')
+    ap.add_argument('--covers', nargs='?', const='', metavar='NAS_DIR',
+                    help='封面三层体检（引用/内容/生效）；可指定单个 NAS 目录')
+    ap.add_argument('--check-content', action='store_true',
+                    help='配合 --covers：查图片文件头，抓 exFAT 截断留下的坏图')
+    ap.add_argument('--cover-sample', type=int, default=0, metavar='N',
+                    help='配合 --covers --check-content：每系统抽查 N 个，0=全查')
+    ap.add_argument('--verbose', action='store_true',
+                    help='配合 --covers：打印缺失样例')
     ap.add_argument('--remove', type=int, metavar='GID')
     ap.add_argument('--purge', action='store_true', help='卸载时直接删除，不进回收站')
     ap.add_argument('--register', action='store_true', help='注册 ES 入口到 Options 菜单')
@@ -257,6 +431,8 @@ def main(argv=None):
     ap.add_argument('--mount', action='store_true', help='按当前源挂载')
     ap.add_argument('--umount', action='store_true', help='卸载挂载点')
     ap.add_argument('--dry-run', action='store_true')
+    ap.add_argument('--no-media', action='store_true',
+                    help='只装 ROM，不导入封面（封面缺失/想省空间时用）')
     ap.add_argument('--page', type=int, default=1)
     ap.add_argument('--size', type=int, default=30)
     a = ap.parse_args(argv)
@@ -276,7 +452,15 @@ def main(argv=None):
     if a.detail is not None:
         return cmd_detail(a.detail)
     if a.install is not None:
-        return cmd_install(a.install, a.dry_run)
+        return cmd_install(a.install, a.dry_run, media=not a.no_media)
+    if a.gaps:
+        return cmd_gaps()
+    if a.covers is not None:
+        return cmd_covers(a.covers or None, a.check_content,
+                          a.cover_sample, a.verbose)
+    if a.import_media is not None:
+        return cmd_import_media(a.import_media, a.dry_run, a.media_limit or None,
+                                update_gamelist=not a.no_gamelist)
     if a.remove is not None:
         return cmd_remove(a.remove, a.purge, a.dry_run)
     if a.register:
@@ -423,6 +607,11 @@ def cmd_remove(gid, purge, dry):
         print('  移动 %d 个文件 -> %s' % (len(r['moved']), r['trash'] or '已直接删除'))
         for p in r['moved']:
             print('     %s' % p)
+        art = r.get('art_moved') or []
+        if art:
+            print('  清理 %d 个封面 -> %s' % (len(art), r['trash'] or '已直接删除'))
+            for p in art:
+                print('     %s' % p)
         print('  gamelist 条目已移除: %s' % (r['rom_name'] or '-'))
     conn.close()
     return 0

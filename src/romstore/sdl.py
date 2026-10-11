@@ -82,8 +82,35 @@ class Color(ctypes.Structure):
                 ('b', ctypes.c_uint8), ('a', ctypes.c_uint8)]
 
 
+class SDL_PixelFormat(ctypes.Structure):
+    """SDL2 的 SDL_PixelFormat。
+
+    **字段顺序必须与 SDL2 头文件完全一致** —— 这是 ABI 布局，错一个字段
+    后面全部读到垃圾。纯 Python 缩放 fallback 只用末尾的 BytesPerPixel
+    （用它判断"每像素几个字节"，只处理 3/4 字节的图）。
+    指针统一按 c_void_p 收（我们不解引用 palette 这些）。
+    """
+    _fields_ = [('format', ctypes.c_uint32), ('palette', ctypes.c_void_p),
+                ('BitsPerPixel', ctypes.c_uint8), ('BytesPerPixel', ctypes.c_uint8),
+                ('padding', ctypes.c_uint8 * 2),
+                ('Rmask', ctypes.c_uint32), ('Gmask', ctypes.c_uint32),
+                ('Bmask', ctypes.c_uint32), ('Amask', ctypes.c_uint32),
+                ('Rloss', ctypes.c_uint8), ('Gloss', ctypes.c_uint8),
+                ('Bloss', ctypes.c_uint8), ('Aloss', ctypes.c_uint8),
+                ('Rshift', ctypes.c_uint8), ('Gshift', ctypes.c_uint8),
+                ('Bshift', ctypes.c_uint8), ('Ashift', ctypes.c_uint8),
+                ('refcount', ctypes.c_int), ('next', ctypes.c_void_p)]
+
+
 class SDL_Surface(ctypes.Structure):
-    _fields_ = [('flags', ctypes.c_uint32), ('format', ctypes.c_void_p),
+    """SDL2 的 SDL_Surface。
+
+    `format` 直接声明为 SDL_PixelFormat* —— **必须在 SDL_PixelFormat 之后定义**
+    （早先写成 c_void_p 再事后改 _fields_ 是错的：ctypes 在第一次访问字段后
+    就锁定了布局，改 _fields_ 不生效，读出来是个 int）。
+    """
+    _fields_ = [('flags', ctypes.c_uint32),
+                ('format', ctypes.POINTER(SDL_PixelFormat)),
                 ('w', ctypes.c_int), ('h', ctypes.c_int),
                 ('pitch', ctypes.c_int), ('pixels', ctypes.c_void_p),
                 ('userdata', ctypes.c_void_p), ('locked', ctypes.c_int),
@@ -181,6 +208,32 @@ class Bind(object):
 
         I.IMG_SavePNG.argtypes = [ctypes.POINTER(SDL_Surface), ctypes.c_char_p]
         I.IMG_SavePNG.restype = ctypes.c_int
+        I.IMG_Load.argtypes = [ctypes.c_char_p]
+        I.IMG_Load.restype = ctypes.POINTER(SDL_Surface)
+
+        # 封面缩放用到的那几个符号**不是所有 libSDL2 都有**。
+        # 实测 r36s（ArkOS4Clone）的 libSDL2-2.0.so.0 里**没有 SDL_BlitScaled**
+        # —— 声明 argtypes 时 ctypes 立刻抛 AttributeError，会把整个 Bind() 拖崩，
+        # 结果连主界面都起不来（不只是没封面）。所以**先探测、再声明**，
+        # 缺了就置 None，由 ImageCache 走纯 Python 缩放兜底。
+        self.has_blitscaled = self._probe(S, 'SDL_BlitScaled')
+        self.has_convertsurf = self._probe(S, 'SDL_ConvertSurfaceFormat')
+
+        if self.has_convertsurf:
+            S.SDL_ConvertSurfaceFormat.argtypes = [ctypes.POINTER(SDL_Surface),
+                                                   ctypes.c_uint32, ctypes.c_uint32]
+            S.SDL_ConvertSurfaceFormat.restype = ctypes.POINTER(SDL_Surface)
+        else:
+            S.SDL_ConvertSurfaceFormat = None
+        if self.has_blitscaled:
+            S.SDL_BlitScaled.argtypes = [ctypes.POINTER(SDL_Surface), ctypes.c_void_p,
+                                         ctypes.POINTER(SDL_Surface), ctypes.c_void_p]
+            S.SDL_BlitScaled.restype = ctypes.c_int
+        else:
+            S.SDL_BlitScaled = None
+        S.SDL_SetColorKey.argtypes = [ctypes.POINTER(SDL_Surface), ctypes.c_int,
+                                      ctypes.c_uint32]
+        S.SDL_SetColorKey.restype = ctypes.c_int
 
         self._version = None
 
@@ -190,6 +243,15 @@ class Bind(object):
             self.sdl.SDL_GetVersion(buf)
             self._version = tuple(ord(buf.raw[i:i + 1]) for i in range(3))
         return self._version
+
+    @staticmethod
+    def _probe(lib, name):
+        """某个符号在这个 libSDL2 里到底有没有（没有就返回 False，不抛异常）"""
+        try:
+            getattr(lib, name)
+            return True
+        except AttributeError:
+            return False
 
     def err(self):
         e = self.sdl.SDL_GetError()
@@ -223,6 +285,11 @@ class Canvas(object):
         self.b.sdl.SDL_UpperBlit(src_surf, None, self.surf,
                                  ctypes.byref(Rect(x, y, 0, 0)))
 
+    def blit_scaled(self, src_surf, x, y, w, h):
+        """把源 surface 缩放贴到 (x, y, w, h)"""
+        self.b.sdl.SDL_BlitScaled(src_surf, None, self.surf,
+                                  ctypes.byref(Rect(x, y, w, h)))
+
     def save_png(self, path):
         return self.b.img.IMG_SavePNG(self.surf, path.encode('utf-8'))
 
@@ -230,6 +297,195 @@ class Canvas(object):
         if self.surf:
             self.b.sdl.SDL_FreeSurface(self.surf)
             self.surf = None
+
+
+class ImageCache(object):
+    """封面缩略图缓存
+
+    详情页每帧都重绘，所以按 (路径, 目标宽高) 缓存**已缩放好的** surface，
+    免得每帧重算。掌机内存只有 1 GB，缓存上限设小（8 张）并 LRU 淘汰。
+
+    缩放优先走 SDL_BlitScaled；**这个符号在 r36s 的 libSDL2 里没有**
+    （见 Bind 里的探测），所以备了一条纯 Python 最近邻缩放路径。
+    纯 Python 慢（400x300 约 0.1 秒），但只在**换游戏时算一次**，
+    之后走缓存，不影响列表滚动与翻页。
+
+    加载失败（文件损坏 / SDL_image 缺对应解码器）返回 None，
+    调用方按「无封面」处理 —— 绝不让一张坏图把整个 UI 拖崩。
+    """
+
+    _LIMIT = 8
+
+    def __init__(self, b):
+        self.b = b
+        self._cache = {}   # (path, w, h) -> surface
+        self._order = []
+
+    def thumb(self, path, w, h):
+        if not path or w <= 0 or h <= 0:
+            return None
+        key = (path, w, h)
+        hit = self._cache.get(key)
+        if hit is not None:
+            return hit if hit is not False else None
+
+        surf = self._make(path, w, h)
+        self._cache[key] = surf if surf else False
+        self._order.append(key)
+        self._trim()
+        return surf
+
+    def _make(self, path, w, h):
+        src = self.b.img.IMG_Load(path.encode('utf-8'))
+        if not src:
+            return None
+        # 原图由本函数的 finally 统一释放；转出来的 conv 由 _scale_* 释放
+        try:
+            sw = src.contents.w
+            sh = src.contents.h
+            if sw <= 0 or sh <= 0:
+                return None
+            # 等比缩放到 w x h 内（letterbox），避免封面被拉变形
+            scale = min(w / float(sw), h / float(sh))
+            tw = max(1, int(sw * scale))
+            th = max(1, int(sh * scale))
+
+            if self.b.has_blitscaled:
+                return self._scale_sdl(src, tw, th)
+            return self._scale_py(src, tw, th)
+        except Exception:
+            # 封面是锦上添花，任何异常都退化成「无封面」，
+            # 绝不能因为一张读不出来的图把整个界面拖崩。
+            return None
+        finally:
+            self.b.sdl.SDL_FreeSurface(src)
+
+    def _to_argb(self, src):
+        """把任意格式的源图转成 32 位 ARGB8888。
+
+        **这一步是必须的**：SDL_image 解 JPEG 得到的是 24 位 BGR
+        （实测 BytesPerPixel=3、Amask=0），直接按 4 字节搬到目标画布上
+        会得到 alpha=0 的像素 —— 画出来完全透明，看着就是"没封面"。
+        用 SDL_ConvertSurfaceFormat 转一次，格式统一、字节序也对，
+        下面两条缩放路径就都不用操心像素格式了。
+
+        本函数只负责转，**不释放 src**；返回的 conv 由调用方释放。
+        没有 SDL_ConvertSurfaceFormat 时退回原图（纯 Python 路径自己补 alpha）。
+        """
+        if not self.b.has_convertsurf:
+            return src, False
+        conv = self.b.sdl.SDL_ConvertSurfaceFormat(
+            src, SDL_PIXELFORMAT_ARGB8888, 0)
+        if conv:
+            return conv, True
+        return src, False
+
+    def _scale_sdl(self, src, tw, th):
+        """SDL 原生缩放（快）。用了 libSDL2 自带的 SDL_BlitScaled
+
+        这里**只管缩放**，不释放 src —— 释放统一由 _make 的 finally 做，
+        免得两处都 free 造成 double free（SDL 会崩）。
+        转换出来的临时 surface 由本函数自己释放。
+        """
+        S = self.b.sdl
+        use, conv_owned = self._to_argb(src)
+        try:
+            dst = Canvas(self.b, tw, th)
+            dst.fill(0x00000000)
+            S.SDL_SetSurfaceBlendMode(use, 1)  # SDL_BLENDMODE_BLEND
+            S.SDL_BlitScaled(use, None, dst.surf, None)
+            return dst.surf
+        finally:
+            if conv_owned:
+                S.SDL_FreeSurface(use)
+
+    def _scale_py(self, src, tw, th):
+        """纯 Python 最近邻缩放（fallback）
+
+        为什么不用 SDL_BlitScaled：r36s 上没这个符号（见 Bind 探测）。
+        为什么不用 SDL_LowerBlit 手动分块：那要自己算拉伸分块，更绕。
+        直接读源 surface 的像素、写目标 surface 的像素最简单，也最可移植
+        —— 只用了 pitch/pixels/format 这几个字段，一切 SDL2 都有。
+
+        进来先经 _to_argb 统一成 32 位 ARGB，所以下面只需处理 4 字节像素。
+        源格式实在认不出来（非 3/4 字节、且本机又没 SDL_ConvertSurfaceFormat）
+        就放弃，返回 None 当无封面。
+        """
+        S = self.b.sdl
+        use, conv_owned = self._to_argb(src)
+        try:
+            fmt = use.contents.format
+            if not fmt:
+                return None
+            try:
+                bpp = fmt.contents.BytesPerPixel
+            except (AttributeError, ValueError):
+                return None
+            if bpp not in (3, 4):
+                return None
+
+            sw, sh = use.contents.w, use.contents.h
+            if sw <= 0 or sh <= 0:
+                return None
+
+            # 读源像素：SDL_LockSurface -> 裸内存 -> 解锁。
+            # 整块读进来，再按行切片（比逐行 string_at 快）。
+            if S.SDL_LockSurface(use) != 0:
+                return None
+            try:
+                pitch = use.contents.pitch
+                raw = ctypes.string_at(use.contents.pixels, pitch * sh)
+                rows = [raw[i * pitch:i * pitch + sw * bpp] for i in range(sh)]
+            finally:
+                S.SDL_UnlockSurface(use)
+
+            # 预计算每个目标列对应的源列（最近邻）
+            xs = [min(sw - 1, (x * sw) // tw) for x in range(tw)]
+
+            dst = Canvas(self.b, tw, th)
+            if S.SDL_LockSurface(dst.surf) != 0:
+                dst.free()
+                return None
+            try:
+                dpitch = dst.surf.contents.pitch
+                dbase = dst.surf.contents.pixels
+                if not dbase:
+                    return None
+                opaque = b'\xff'          # 3 字节源补的不透明 alpha
+                for y in range(th):
+                    sy = min(sh - 1, (y * sh) // th)
+                    srow = rows[sy]
+                    out = bytearray()
+                    if bpp == 4:
+                        for sx in xs:
+                            o = sx * 4
+                            out += srow[o:o + 4]
+                    else:  # 3 字节：按 BGR 原样搬，补 0xFF 的不透明 alpha
+                        for sx in xs:
+                            o = sx * 3
+                            out += srow[o:o + 3] + opaque
+                    ctypes.memmove(dbase + y * dpitch, bytes(out), len(out))
+            finally:
+                S.SDL_UnlockSurface(dst.surf)
+            return dst.surf
+        finally:
+            if conv_owned:
+                S.SDL_FreeSurface(use)
+
+    def _trim(self):
+        while len(self._order) > self._LIMIT:
+            k = self._order.pop(0)
+            if k in self._cache:
+                s = self._cache.pop(k)
+                if s is not False and s:
+                    self.b.sdl.SDL_FreeSurface(s)
+
+    def clear(self):
+        for s in self._cache.values():
+            if s is not False and s:
+                self.b.sdl.SDL_FreeSurface(s)
+        self._cache = {}
+        self._order = []
 
 
 class Fonts(object):

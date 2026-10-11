@@ -28,6 +28,7 @@ import time
 from . import config
 from . import index as idx
 from . import install as inst
+from . import media as media_mod
 from . import meta
 from . import sdl
 from . import source as src
@@ -58,6 +59,7 @@ PHASE_CN = {
     'check': '检查空间',
     'copy': '复制文件',
     'm3u': '生成播放列表',
+    'art': '复制封面',
     'gamelist': '写入游戏列表',
     'done': '完成',
     'scan': '扫描 NAS',
@@ -131,6 +133,7 @@ class App(object):
         self.f_big = sdl.Fonts(self.b, font_path, 30)
 
         self.canvas = sdl.Canvas(self.b, self.ww, self.wh)
+        self.imgs = sdl.ImageCache(self.b)
         self.display = None
         if not headless:
             self.display = sdl.Display(self.b, self.ww, self.wh)
@@ -363,6 +366,21 @@ class App(object):
         w = f.width(s)
         self.txt(s, xr - w, y, rgb, f)
 
+    def clip(self, s, maxw, font=None):
+        """按像素宽度截断并加省略号（详情页左栏窄，长路径会顶到封面）"""
+        f = font or self.f_small
+        s = s or ''
+        if f.width(s) <= maxw:
+            return s
+        ell = '…'
+        ew = f.width(ell)
+        out = ''
+        for ch in s:
+            if f.width(out + ch) + ew > maxw:
+                break
+            out += ch
+        return out + ell
+
     def header(self, title, sub=''):
         self.canvas.rect(0, 0, self.ww, HEADER_H, HEADER_BG)
         self.canvas.rect(0, HEADER_H - 2, self.ww, 2, SEL_EDGE)
@@ -486,6 +504,36 @@ class App(object):
             return self.render_games()
         self.header(g['title'], g['nas_dir'])
         srcs, total = inst.rom_sources(self.conn, g)
+
+        # 右栏：封面预览（NAS 上有图就先给用户看，装之前就能确认刮削对不对）
+        pad = 16
+        gap = 14
+        prev_w, prev_h = 150, 200
+        prev_x = self.ww - prev_w - pad
+        prev_y = HEADER_H + 10
+        surf = None
+        cov = media_mod.find_asset(
+            os.path.join(config.NAS_ROOT, g['nas_dir']), g['rom_rel'] or '',
+            'box_front', g['media_dir'] if 'media_dir' in g.keys() else None)
+        if cov[0]:
+            surf = self.imgs.thumb(cov[0], prev_w, prev_h)
+        self.canvas.rect(prev_x, prev_y, prev_w, prev_h, 0xFF232323)
+        if surf is not None:
+            sw = surf.contents.w
+            sh = surf.contents.h
+            ox = prev_x + (prev_w - sw) // 2
+            self.canvas.blit(surf, ox, prev_y + (prev_h - sh) // 2)
+        else:
+            self.txt_r('无封面', prev_x + prev_w - 6, prev_y + prev_h // 2 - 8,
+                       TEXT_MUTE, self.f_small)
+        self.canvas.rect(prev_x, prev_y, 1, prev_h, 0xFF3A3A3A)
+        self.canvas.rect(prev_x, prev_y + prev_h - 1, prev_w, 1, 0xFF3A3A3A)
+        cover_bottom = prev_y + prev_h
+
+        # 左栏：信息（宽度让出封面那一栏，长路径按像素截断）
+        info_x = 20
+        info_vx = 90
+        info_right = prev_x - gap
         y = HEADER_H + 10
         lines = [
             ('系统', '%s  ->  %s' % (g['es_name'], g['es_path'])),
@@ -496,19 +544,21 @@ class App(object):
         if srcs:
             lines.insert(2, ('文件', os.path.basename(srcs[0][1])))
         for k, v in lines:
-            self.txt(k, 20, y, TEXT_MUTE, self.f_small)
-            self.txt(v, 90, y, TEXT if k == '状态' and '未' not in v else TEXT_DIM, self.f_small)
+            self.txt(k, info_x, y, TEXT_MUTE, self.f_small)
+            self.txt(self.clip(v, info_right - info_vx), info_vx, y,
+                     TEXT if k == '状态' and '未' not in v else TEXT_DIM, self.f_small)
             y += 22
-        y += 6
-        self.canvas.rect(16, y, self.ww - 32, 2, 0xFF3A3A3A)
+
+        # 分隔线以下才是简介：**必须从封面底边之后开始**，否则文字会从图后面穿过去
+        y = max(y + 6, cover_bottom + 6)
+        self.canvas.rect(pad, y, self.ww - pad * 2, 2, 0xFF3A3A3A)
         y += 8
-        maxw = self.ww - 40
         body_h = self.wh - FOOTER_H - y - 6
         maxlines = max(1, body_h // 22)
-        wl = wrap(self.detail_desc, self.f_row, maxw, maxlines + self.detail_scroll)
+        wl = wrap(self.detail_desc, self.f_row, self.ww - pad * 2, maxlines + self.detail_scroll)
         wl = wl[self.detail_scroll:self.detail_scroll + maxlines]
         for ln in wl:
-            self.txt(ln, 20, y, TEXT_DIM, self.f_row)
+            self.txt(ln, pad, y, TEXT_DIM, self.f_row)
             y += 22
         free = inst.human(inst.free_bytes(g['es_path']))
         self.footer([('A/X', '安装'), ('Y', '卸载'), ('L1/R1', '滚动'), ('B', '返回'),
@@ -735,8 +785,16 @@ class App(object):
             elif kind == 'install':
                 if r.get('ok'):
                     self.installed_cache.clear()
-                    self.msg = {'text': '安装成功：%s\n%s'
-                                        % (r.get('rom_name', ''), inst.human(r.get('bytes'))),
+                    art = r.get('art') or {}
+                    if art.get('ok'):
+                        extra = '\n封面已导入：%s' % (r.get('image') or '')
+                    elif art.get('reason'):
+                        extra = '\n封面未导入（%s）' % art['reason']
+                    else:
+                        extra = ''
+                    self.msg = {'text': '安装成功：%s\n%s%s'
+                                        % (r.get('rom_name', ''),
+                                           inst.human(r.get('bytes')), extra),
                                 'color': GREEN}
                     self.screen = 'detail' if self.detail_game else 'games'
                 else:
@@ -751,7 +809,10 @@ class App(object):
                                         % (r.get('rom_name') or ''), 'color': WARN}
                 else:
                     self.installed_cache.clear()
-                    self.msg = {'text': '已卸载：%s' % (r.get('rom_name') or ''),
+                    art_n = len(r.get('art_moved') or [])
+                    extra = '（含封面 %d 个）' % art_n if art_n else ''
+                    self.msg = {'text': '已卸载：%s%s'
+                                        % (r.get('rom_name') or '', extra),
                                 'color': GREEN}
                 self.screen = 'detail' if self.detail_game else 'games'
             elif kind == 'mount':
@@ -1032,7 +1093,12 @@ class App(object):
 
 
 def run_script(actions, dumpdir, size=(W, H)):
-    """无头脚本模式：按顺序执行动作，每步导出一张 PNG（用于远程验证界面）"""
+    """无头脚本模式：按顺序执行动作，每步导出一张 PNG（用于远程验证界面）
+
+    支持的动作：任意按键名（up/down/ok/back/...）；
+    另有 `goto:<游戏id>` —— 直接跳到该游戏的详情页，省去按键导航
+    （远程验证封面时特别有用，不用靠上下翻找出目标游戏）。
+    """
     if not os.path.isdir(dumpdir):
         os.makedirs(dumpdir, exist_ok=True)
     app = App(headless=True, size=size)
@@ -1048,7 +1114,10 @@ def run_script(actions, dumpdir, size=(W, H)):
         while app.worker and app.worker.is_alive() and guard < 600:
             app.worker.join(0.1)
             guard += 1
-        app.handle(a)
+        if a.startswith('goto:'):
+            _goto_game(app, a[5:])
+        else:
+            app.handle(a)
         # 等本轮后台任务，同时把进度屏也导出一帧
         guard = 0
         dumped_progress = False
@@ -1062,8 +1131,32 @@ def run_script(actions, dumpdir, size=(W, H)):
             app.worker.join(0.1)
             guard += 1
         name = getattr(app, 'screen', 'x')
-        p = os.path.join(dumpdir, '%02d_%s_%s.png' % (n, a, name))
+        p = os.path.join(dumpdir, '%02d_%s_%s.png' % (n, a.replace(':', '-'), name))
         app.shot(p)
         out.append(p)
     app.close()
     return out
+
+
+def _goto_game(app, gid):
+    """把 app 直接切到某个游戏 id 的详情页（无头验证用）"""
+    try:
+        gid = int(gid)
+    except ValueError:
+        return
+    try:
+        g = idx.get_game(app.conn, gid)
+    except Exception:
+        g = None
+    if not g:
+        return
+    # 让当前系统/列表也指到它，返回时不会跳到别的系统
+    for i, s in enumerate(app.sys_rows):
+        if s['nas_dir'] == g['nas_dir']:
+            app.sys_sel = i
+            break
+    app.load_games()
+    app.detail_game = g
+    app.detail_desc = app.load_desc(g)
+    app.detail_scroll = 0
+    app.screen = 'detail'

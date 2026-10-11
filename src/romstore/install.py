@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """安装 / 卸载
 
-一次「安装」做三件事：
+一次「安装」做四件事：
   1. 复制 ROM（单碟 1 个文件；多碟 N 个文件 + 生成 .m3u）
-  2. 写 / 更新 gamelist.xml 里的一条 <game>（中文标题 + 描述）
-  3. （P1 不做）复制封面 —— 封面走 CIFS 现取，见文档 §7.3
+  2. 复制封面到 /roms/<系统>/<img|media>/（见 media.py，P2 新增）
+  3. 写 / 更新 gamelist.xml 里的一条 <game>（中文标题 + 描述 + 封面路径）
+  4. （仍不做）视频预览 —— 单张 2 MB，SD 写速只有 4.8 MB/s，留待按需选装
 
 gamelist.xml 采用**文本级插入**而非重新解析序列化：
   掌机上 /roms/nes/gamelist.xml 已有 926 条、带 BOM、2 空格缩进，
@@ -17,6 +18,7 @@ import shutil
 import time
 
 from . import config
+from . import media as media_mod
 
 _GL_HEAD = '<?xml version="1.0" encoding="utf-8" standalone="yes"?>\n<gameList>\n</gameList>\n'
 
@@ -130,6 +132,12 @@ def _find_block(text, rom_name):
     return None
 
 
+def _extract_tag(block, tag):
+    """从一段 <game> 块里取出 <tag> 的值，没有就返回 None（不解析 XML，纯文本）"""
+    m = re.search(r'<%s>\s*(.*?)\s*</%s>' % (tag, tag), block, re.S)
+    return m.group(1) if m else None
+
+
 def upsert_gamelist(es_path, entries, dry_run=False):
     """entries: [{'rom_name','title','desc','image','developer','genre','players'}]
 
@@ -155,10 +163,20 @@ def upsert_gamelist(es_path, entries, dry_run=False):
     added = updated = 0
     for e in entries:
         rom_name = e['rom_name']
-        block = build_gamelist_block(rom_name, e.get('title'), e.get('desc'),
-                                     e.get('image'), e.get('developer'),
-                                     e.get('genre'), e.get('players'), nl=nl)
+        image = e.get('image')
         hit = _find_block(text, rom_name)
+        # **绝不覆盖已有的 <image>**：这一次没找到/没导入封面时，
+        # e['image'] 是 None，若直接重建 block 会把原条目里本来就有的
+        # <image> 删掉（0.4.0 实机踩过：装 GBA 的 GT3锦标赛 时，
+        # 它原本指向 ./media/GT3锦标赛/boxfront.png，被我们抹成了无图）。
+        # 封面只做增量补充：新图优先，没有新图就沿用旧的。
+        if hit and not image:
+            old_img = _extract_tag(hit[2], 'image')
+            if old_img:
+                image = old_img
+        block = build_gamelist_block(rom_name, e.get('title'), e.get('desc'),
+                                     image, e.get('developer'),
+                                     e.get('genre'), e.get('players'), nl=nl)
         if hit:
             s, en, _old = hit
             text = text[:s] + block + text[en:]
@@ -183,10 +201,13 @@ def already_installed(es_path, rom_name):
 
 
 def install(conn, game, rom_bytes=None, progress=None, dry_run=False,
-            copy_media=False):
+            copy_media=True):
     """安装一个游戏。progress(phase, done, total, msg)
 
-    phase: 'check' | 'copy' | 'm3u' | 'gamelist' | 'done'
+    phase: 'check' | 'copy' | 'm3u' | 'art' | 'gamelist' | 'done'
+
+    copy_media=True 时，顺带把封面复制到 /roms/<系统>/<img|media>/，
+    并写进 gamelist 的 <image>（P2 新增；NAS 上没有封面就静默跳过）。
     """
     es_path = game['es_path']
     if not es_path:
@@ -259,12 +280,26 @@ def install(conn, game, rom_bytes=None, progress=None, dry_run=False,
     else:
         gl_rom = written[0][0]
 
+    # ---- 封面 ----------------------------------------------------------------
+    # 素材在 NAS 上按 media/<ROM名去扩展名>/ 放，可直接推导（见 media.py）。
+    # 掌机侧写**显式路径**给 ES，所以不需要猜目录约定；
+    # 但目录名要沿用该系统既有习惯（nes 用 img/、gba 用 media/）。
+    image_rel = None
+    art = {'ok': False, 'copied': None, 'reason': None}
+    if copy_media:
+        if progress:
+            progress('art', total, total, '复制封面')
+        art = _install_cover(game, es_path, gl_rom, dry_run=dry_run)
+        if art.get('ok'):
+            image_rel = art['gamelist_path']
+
     desc = game['desc'] if 'desc' in game.keys() else None
     if progress:
         progress('gamelist', total, total, '写入 gamelist.xml')
     added, updated, glpath = upsert_gamelist(es_path, [{
         'rom_name': gl_rom, 'title': title, 'desc': desc,
         'developer': game['developer'] if 'developer' in game.keys() else None,
+        'image': image_rel,
     }])
 
     if progress:
@@ -272,7 +307,66 @@ def install(conn, game, rom_bytes=None, progress=None, dry_run=False,
     return {'ok': True, 'dest': dest_dir, 'm3u': m3u_path, 'bytes': total,
             'files': len(srcs), 'gamelist': glpath,
             'gamelist_added': added, 'gamelist_updated': updated,
-            'rom_name': gl_rom}
+            'rom_name': gl_rom, 'image': image_rel, 'art': art}
+
+
+def _install_cover(game, es_path, rom_name, dry_run=False):
+    """把 NAS 上的封面复制到掌机，并返回 gamelist 用的相对路径
+
+    返回 {'ok', 'copied', 'gamelist_path', 'reason'}；没有封面时 ok=False
+    且带 reason，**不视为安装失败**（很多游戏 NAS 上本来就没图）。
+
+    掌机侧有**两套布局**（实测 2026-10-11）：
+      flat   nes: img/1943.png                 —— 散文件
+      subdir gba: media/黄金太阳/boxfront.png   —— 每游戏一子目录
+    先探测该系统在用哪套，再按同款写；否则新装的 GBA 游戏会跟同系统
+    另外 462 个游戏长得不一样，还可能撞上已存在的同名目录。
+    """
+    nas_dir = game['nas_dir']
+    nas_sys = os.path.join(config.NAS_ROOT, nas_dir)
+    media_dir = game['media_dir'] if 'media_dir' in game.keys() else None
+
+    src, rel = media_mod.find_asset(nas_sys, rom_name, 'box_front', media_dir)
+    if not src:
+        return {'ok': False, 'reason': 'NAS 上没有封面', 'copied': None}
+
+    ext = os.path.splitext(src)[1].lower() or '.png'
+
+    # 决定目录名 + 布局：沿用该系统已有写法
+    gl = os.path.join(es_path, 'gamelist.xml')
+    gl_text = None
+    if os.path.isfile(gl):
+        try:
+            with open(gl, 'rb') as f:
+                gl_text = f.read().decode('utf-8-sig', 'replace')
+        except OSError:
+            gl_text = None
+    sub, layout = media_mod.pick_media_dir(es_path, gl_text)
+
+    rel_path, parts = media_mod.target_image_rel(sub, layout, rom_name, ext)
+    dst = os.path.join(es_path, *parts)
+    gl_path = './' + rel_path
+
+    # 子目录式布局下，若同名**文件**已存在（历史遗留的散文件），
+    # makedirs 会失败 —— 先探一下给出清楚的原因，别让安装无谓报错。
+    if layout == media_mod.LAYOUT_SUBDIR:
+        first = os.path.join(es_path, parts[0], parts[1])
+        if os.path.isfile(first):
+            return {'ok': False, 'copied': None,
+                    'reason': '同名文件挡路，无法建封面目录: %s' % first}
+
+    if dry_run:
+        return {'ok': True, 'copied': dst, 'bytes': None,
+                'gamelist_path': gl_path, 'layout': layout}
+
+    try:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        n = media_mod.copy_atomic(src, dst)
+    except OSError as e:
+        return {'ok': False, 'reason': '复制封面失败: %s' % e, 'copied': None}
+
+    return {'ok': True, 'copied': dst, 'bytes': n, 'source': src,
+            'gamelist_path': gl_path, 'layout': layout}
 
 
 def remove(conn, game, to_trash=True, dry_run=False):
@@ -281,10 +375,26 @@ def remove(conn, game, to_trash=True, dry_run=False):
     srcs, total = rom_sources(conn, game)
     base_src = os.path.join(config.NAS_ROOT, game['nas_dir'])
     rom_name = None
+    art_stems = []
     if game['is_multi']:
         rom_name = sanitize(game['title']) + '.m3u'
+        art_stems.append(sanitize(game['title']))
     elif srcs:
         rom_name = srcs[0][1]
+    # 封面基准名：优先 NAS 上 ROM 去扩展名（安装时就按它命名的）
+    if srcs:
+        art_stems.append(media_mod.rom_stem(srcs[0][1]))
+    # 兜底：gamelist 用的 rom_name 去扩展名
+    if rom_name:
+        art_stems.append(media_mod.rom_stem(rom_name))
+    # 去重且保序
+    _seen = set()
+    _uniq = []
+    for s in art_stems:
+        if s and s.lower() not in _seen:
+            _seen.add(s.lower())
+            _uniq.append(s)
+    art_stems = _uniq
 
     moved = []
     if rom_name:
@@ -349,9 +459,116 @@ def remove(conn, game, to_trash=True, dry_run=False):
                 os.remove(m3u)
             m3u_moved = True
 
-    if not dry_run and not moved and not m3u_moved:
+    # ---- 封面 ----------------------------------------------------------------
+    # 两套布局都要清（实测 nes 散文件 / gba 每游戏子目录）：
+    #   flat   img/1943.png
+    #   subdir media/1943/boxfront.png  -> 要连空目录一起收掉
+    art_moved = []
+    if art_stems:
+        for sub in media_mod._KNOWN_MEDIA_DIRS:
+            d = os.path.join(es_path, sub)
+            if not os.path.isdir(d):
+                continue
+            # flat：<stem>.<图片扩展名>
+            for stem in art_stems:
+                for fn in _images_with_stem(d, stem):
+                    p = os.path.join(d, fn)
+                    if p in art_moved:
+                        continue
+                    if dry_run:
+                        art_moved.append(p)
+                        continue
+                    if to_trash:
+                        shutil.move(p, os.path.join(_trash_dir(), fn))
+                    else:
+                        os.remove(p)
+                    art_moved.append(p)
+            # subdir：<stem>/ 里的图片；只在该目录**整体**是素材时才删
+            for stem in art_stems:
+                sub_dir = _find_dir_ci(d, stem)
+                if not sub_dir:
+                    continue
+                imgs = _images_in_dir(sub_dir)
+                # 只在目录里全是图片（没有别的东西）时才动手，避免误删
+                try:
+                    allnames = os.listdir(sub_dir)
+                except OSError:
+                    continue
+                if not imgs:
+                    continue
+                leftover = [n for n in allnames
+                            if n not in imgs]
+                for fn in imgs:
+                    p = os.path.join(sub_dir, fn)
+                    if p in art_moved:
+                        continue
+                    if dry_run:
+                        art_moved.append(p)
+                        continue
+                    if to_trash:
+                        shutil.move(p, os.path.join(_trash_dir(), fn))
+                    else:
+                        os.remove(p)
+                    art_moved.append(p)
+                # 素材目录空了才删；里面有 video.mp4 之类非图片就保留
+                if not dry_run and not leftover:
+                    try:
+                        os.rmdir(sub_dir)
+                    except OSError:
+                        pass
+
+    if not dry_run and not moved and not m3u_moved and not art_moved:
         # 本地没有这个游戏：不能谎报"已卸载"
         return {'ok': True, 'nothing': True, 'moved': [],
-                'trash': trash, 'rom_name': rom_name}
+                'trash': trash, 'rom_name': rom_name, 'art_moved': []}
 
-    return {'ok': True, 'moved': moved, 'trash': trash, 'rom_name': rom_name}
+    return {'ok': True, 'moved': moved, 'trash': trash, 'rom_name': rom_name,
+            'art_moved': art_moved}
+
+
+def _find_dir_ci(d, stem):
+    """在目录 d 里按大小写不敏感找子目录 stem，返回绝对路径或 None"""
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return None
+    want = stem.lower()
+    for n in names:
+        if n.lower() != want:
+            continue
+        p = os.path.join(d, n)
+        if os.path.isdir(p):
+            return p
+    return None
+
+
+def _images_in_dir(d):
+    """列出目录里所有纯图片文件名"""
+    out = []
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return out
+    for n in names:
+        p = os.path.join(d, n)
+        if os.path.isfile(p) and os.path.splitext(n)[1].lower() in media_mod._IMG_EXTS:
+            out.append(n)
+    return out
+
+
+def _images_with_stem(d, stem):
+    """列出目录里所有 <stem>.<图片扩展名> 的文件（大小写不敏感）
+
+    只认纯图片扩展名，避免把同名 ROM 误当封面删掉。
+    """
+    out = []
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return out
+    want = stem.lower()
+    for n in names:
+        base, ext = os.path.splitext(n)
+        if base.lower() == want and ext.lower() in media_mod._IMG_EXTS:
+            out.append(n)
+    return out

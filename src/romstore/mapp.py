@@ -125,6 +125,45 @@ def lookup(nas_dir):
     return (m[1], m[2], m[3], m[4])
 
 
+# 按 ES 名反查：一个 ES 名可能对应多个 NAS 目录（如 nes ← FC / FC hack / FC-HD）
+def _by_es_name():
+    d = {}
+    for m in MAP:
+        d.setdefault(m[1], m)
+    return d
+
+
+_BY_ES = _by_es_name()
+
+
+def resolve(name):
+    """宽容解析用户输入：先按 NAS 目录名，再按 ES 系统名（大小写不敏感）
+
+    为什么需要（0.4.1 实机踩坑）：
+      用户在掌机上看到的是 **ES 名**（`gba`），但内部一律按 **NAS 目录名**（`GBA`）
+      拼路径。两者经常不同（`nes` ← `FC`、`ppsspp` ← `PSP`）。
+      让用户记两套名字不现实，所以这里两种都认。
+
+    返回 (nas_dir, es_name, es_path, conf, note) 或 None。
+    """
+    m = _BY_DIR.get(name)
+    if m:
+        return (m[0],) + m[1:]
+    # 大小写不敏感的 NAS 目录名
+    low = name.lower()
+    for k, v in _BY_DIR.items():
+        if k.lower() == low:
+            return (k,) + v[1:]
+    # 按 ES 名
+    v = _BY_ES.get(low)
+    if v:
+        return tuple(v)
+    for k, v in _BY_ES.items():
+        if k.lower() == low:
+            return tuple(v)
+    return None
+
+
 def load_es_systems(cfg_path=None):
     """解析 es_systems.cfg，返回 [(name, path, extensions_set)]
 

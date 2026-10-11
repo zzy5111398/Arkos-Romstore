@@ -20,6 +20,8 @@
 from __future__ import annotations
 
 import argparse
+import gzip
+import hashlib
 import os
 import pathlib
 import sys
@@ -34,6 +36,10 @@ HERE = pathlib.Path(__file__).resolve().parent
 SKIP_DIRS = {
     '__pycache__', '.git', '.svn', '.hg', '.idea', '.vscode',
     '.pytest_cache', '.mypy_cache', 'node_modules',
+    # 开发期自测，不分发给装机的人
+    'tests',
+    # 项目元数据（工作日志 / 长期笔记）—— 是开发过程的产物，不分发给装机的人
+    '.workbuddy',
 }
 
 #: 一律排除的后缀
@@ -41,6 +47,9 @@ SKIP_SUFFIX = {'.pyc', '.pyo', '.pyd', '.orig', '.rej', '.swp'}
 
 #: 一律排除的文件名
 SKIP_NAMES = {'.DS_Store', 'Thumbs.db', 'desktop.ini'}
+
+#: 开发期自测脚本（下划线开头），不分发给装机的人
+SKIP_PREFIX = '_'
 
 #: 打包脚本自己产出的东西，不能进包
 SKIP_GLOBS = ('*.tar.gz', '*.tgz', '*.zip', '*.tar')
@@ -76,6 +85,8 @@ def collect(root: pathlib.Path):
             continue
         if p.suffix in SKIP_SUFFIX or p.name in SKIP_NAMES:
             continue
+        if p.name.startswith(SKIP_PREFIX):
+            continue
         if any(rel.match(g) for g in SKIP_GLOBS):
             continue
 
@@ -88,22 +99,44 @@ def collect(root: pathlib.Path):
 # --------------------------------------------------------------- 写盘
 
 def write_tar_gz(items, out_path: pathlib.Path, prefix: str, epoch=None):
-    # mtime 统一：显式给定则全部对齐（可复现构建），否则用文件自身的
-    with tarfile.open(str(out_path), 'w:gz') as tf:
-        for src, rel, mode in items:
-            arcname = '%s/%s' % (prefix, rel.as_posix())
+    """写 tar.gz。
 
-            ti = tf.gettarinfo(str(src), arcname=arcname)
-            ti.mode = mode
-            ti.uid = 0
-            ti.gid = 0
-            ti.uname = ''
-            ti.gname = ''
-            if epoch is not None:
-                ti.mtime = epoch
+    注意：`--epoch` 必须同时固定 **两层** 时间戳，否则不是可复现构建 ——
+      1. tar 里每个条目的 mtime
+      2. **gzip 容器头部的 mtime** —— 这一层最容易漏。`tarfile.open(mode='w:gz')`
+         不接受 mtime 参数，它内部用 `time.time()`；两次构建只要落到不同的秒，
+         md5 就不同（很容易被误判成「可复现」——背靠背跑两次往往是同一秒）。
+         所以要自己套一层 GzipFile 并把 mtime 传进去。
+    """
+    if epoch is None:
+        with tarfile.open(str(out_path), 'w:gz') as tf:
+            for src, rel, mode in items:
+                _add_tar_member(tf, src, '%s/%s' % (prefix, rel.as_posix()),
+                                mode, None)
+        return
 
-            with open(str(src), 'rb') as fh:
-                tf.addfile(ti, fh)
+    # 显式控制 gzip 层：filename='' 避免把宿主路径写进头部
+    with open(str(out_path), 'wb') as raw:
+        with gzip.GzipFile(filename='', mode='wb', fileobj=raw,
+                           mtime=epoch) as gz:
+            with tarfile.open(fileobj=gz, mode='w') as tf:
+                for src, rel, mode in items:
+                    _add_tar_member(tf, src,
+                                    '%s/%s' % (prefix, rel.as_posix()),
+                                    mode, epoch)
+
+
+def _add_tar_member(tf, src: pathlib.Path, arcname: str, mode: int, epoch):
+    ti = tf.gettarinfo(str(src), arcname=arcname)
+    ti.mode = mode
+    ti.uid = 0
+    ti.gid = 0
+    ti.uname = ''
+    ti.gname = ''
+    if epoch is not None:
+        ti.mtime = epoch
+    with open(str(src), 'rb') as fh:
+        tf.addfile(ti, fh)
 
 
 def write_zip(items, out_path: pathlib.Path, prefix: str, epoch=None):
@@ -164,9 +197,12 @@ def main(argv=None):
         return 1
 
     # 打之前先把关：必备文件在不在
-    need = ['install.sh', 'uninstall.sh', 'README.md', 'VERSION',
+    need = ['install.sh', 'uninstall.sh', 'README.md', 'RELEASE-NOTES.md',
+            'CHANGELOG.md', 'VERSION',
             'src/run.py', 'src/RomStore.sh', 'src/nas-roms-mount.sh',
-            'src/romstore/ui.py', 'systemd/nas-roms.service']
+            'src/romstore/ui.py', 'src/romstore/media.py',
+            'src/romstore/batchmedia.py',
+            'systemd/nas-roms.service']
     have = {rel.as_posix() for _, rel, _ in items}
     missing = [n for n in need if n not in have]
     if missing:
@@ -204,6 +240,21 @@ def main(argv=None):
 
     for f in (tgz, zp):
         print('  %-32s %8.1f KB' % (f.name, f.stat().st_size / 1024.0))
+
+    # 校验和落在包外（不能写进包内 —— 那样哈希会自我引用，永远对不上）
+    # 必须用二进制写：Path.write_text() 在 Windows 上会把 \n 翻成 \r\n，
+    # 而 sha256sum -c 在 Linux 侧读到行尾的 \r 会直接报 "No such file or directory"。
+    sha = outdir / 'SHA256SUMS'
+    lines = []
+    for f in (tgz, zp):
+        h = hashlib.sha256(f.read_bytes()).hexdigest()
+        lines.append('%s  %s' % (h, f.name))
+    with open(str(sha), 'wb') as fh:
+        fh.write(('\n'.join(lines) + '\n').encode('ascii'))
+    print('')
+    print('  %s' % sha.name)
+    for ln in lines:
+        print('    %s' % ln)
 
     execs = [rel.as_posix() for _, rel, mode in items if mode & 0o111]
     print('')

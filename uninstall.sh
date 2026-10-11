@@ -220,6 +220,26 @@ fi
 
 # ----------------------------------------------------------------- 总结
 head_ "卸载完成"
+
+# 卸载后自检：确认真的干净了，避免「以为卸了其实还在」
+LEFT=0
+for f in "$UNIT" "$DISPATCHER" "$MOUNT_SCRIPT" "$ES_DIR/RomStore.sh"; do
+    if [ -e "$f" ]; then
+        printf '  %s✘%s 残留：%s\n' "$C_R" "$C_0" "$f"
+        LEFT=1
+    fi
+done
+if [ -f "$ES_DIR/gamelist.xml" ] && grep -q 'RomStore\.sh' "$ES_DIR/gamelist.xml" 2>/dev/null; then
+    printf '  %s✘%s 残留：%s 里仍有「ROM 商店」条目\n' "$C_R" "$C_0" "$ES_DIR/gamelist.xml"
+    LEFT=1
+fi
+if [ "$KEEP_MOUNT" != "1" ] && mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
+    printf '  %s✘%s 残留：%s 仍处于挂载状态\n' "$C_R" "$C_0" "$MOUNT_POINT"
+    LEFT=1
+fi
+[ "$LEFT" = "0" ] && printf '  %s✔%s 已清理干净（无残留文件/挂载/菜单条目）\n' "$C_G" "$C_0"
+
+say ""
 say "  已移除：ES 入口、入口脚本$([ "$KEEP_MOUNT" = "1" ] || echo "、挂载服务")"
 if [ "$PURGE" = "1" ]; then
     say "  已删除：程序目录"

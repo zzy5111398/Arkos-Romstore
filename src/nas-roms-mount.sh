@@ -131,6 +131,16 @@ fi
 
 mkdir -p "$MP"
 
+# mount.cifs 是用户态 helper —— 内核 cifs 干活前要先找到它。
+# 实机踩到过：cifs-utils 没装时，`mount -t cifs` 报的是
+# 「bad option; ... you might need a /sbin/mount.<type> helper program」，
+# 看着像参数写错了，其实是缺包。这里提前给一句能对症的话。
+if ! command -v mount.cifs >/dev/null 2>&1; then
+    # 内核内建 cifs 时，某些 mount 版本不带 helper 也能挂；别一口咬定失败，
+    # 先照常尝试，但把这句诊断留在输出里。
+    echo "提示：未找到 mount.cifs（cifs-utils 未装？）—— 尝试继续，失败请装 cifs-utils"
+fi
+
 # 等 445 端口可用（最多 60 秒）
 for _ in $(seq 1 30); do
     nc -z -w 2 "$D_HOST" 445 >/dev/null 2>&1 && break
