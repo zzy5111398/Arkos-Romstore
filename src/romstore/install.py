@@ -55,8 +55,14 @@ def human(n):
 
 
 def rom_sources(conn, game):
-    """返回 [(源路径, 目标文件名)]，并给出总字节数（会 stat，详情页调用）"""
-    nas_dir = game['nas_dir']
+    """返回 [(源路径, 目标文件名)]，并给出总字节数（会 stat，详情页调用）
+
+    源目录取 **`src_dir` 而不是 `nas_dir`**：同一个 ES 系统可能被拆到
+    多个 NAS 目录（实测 SS / SS plus 共用一份 metadata、ROM 编号互补），
+    索引已把每款游戏解析到文件真正所在的那个目录。见 index._resolve。
+    老库里没有 src_dir（建表早于该列），回退到 nas_dir。
+    """
+    nas_dir = game['src_dir'] or game['nas_dir']
     base_src = os.path.join(config.NAS_ROOT, nas_dir)
     rels = []
     if game['roms_json']:
@@ -322,7 +328,11 @@ def _install_cover(game, es_path, rom_name, dry_run=False):
     先探测该系统在用哪套，再按同款写；否则新装的 GBA 游戏会跟同系统
     另外 462 个游戏长得不一样，还可能撞上已存在的同名目录。
     """
-    nas_dir = game['nas_dir']
+    # 素材目录用 **src_dir**：同一 ES 系统拆到多个 NAS 目录时
+    # （PS1/PS1 hack、DC/DC hack、SS/SS plus 共用一份 metadata、ROM 互补分布），
+    # **素材跟着 ROM 文件走**，去 nas_dir 找会一个都找不到。
+    # 见 cover.CoverLoader 与 rom_sources 的同类修复。
+    nas_dir = game['src_dir'] or game['nas_dir']
     nas_sys = os.path.join(config.NAS_ROOT, nas_dir)
     media_dir = game['media_dir'] if 'media_dir' in game.keys() else None
 
@@ -373,7 +383,8 @@ def remove(conn, game, to_trash=True, dry_run=False):
     """卸载：ROM（+m3u +子目录）移入回收站，并删除 gamelist 条目"""
     es_path = game['es_path']
     srcs, total = rom_sources(conn, game)
-    base_src = os.path.join(config.NAS_ROOT, game['nas_dir'])
+    # 素材目录同样要用 src_dir（原因同 copy_cover）
+    base_src = os.path.join(config.NAS_ROOT, game['src_dir'] or game['nas_dir'])
     rom_name = None
     art_stems = []
     if game['is_multi']:

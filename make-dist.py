@@ -40,6 +40,11 @@ SKIP_DIRS = {
     'tests',
     # 项目元数据（工作日志 / 长期笔记）—— 是开发过程的产物，不分发给装机的人
     '.workbuddy',
+    # 验收截图（0.5.0 起）：本机无头渲染的 PNG，纯开发过程产物
+    '.shots',
+    # docs/ 只为 GitHub 上的 README 服务（截图在仓库里能显示），
+    # 装机的人拿到的是 tar.gz，README 里的图引不到也没意义，白占 200 KB
+    'docs',
 }
 
 #: 一律排除的后缀
@@ -201,10 +206,14 @@ def main(argv=None):
             'CHANGELOG.md', 'VERSION',
             'src/run.py', 'src/RomStore.sh', 'src/nas-roms-mount.sh',
             'src/romstore/ui.py', 'src/romstore/media.py',
-            'src/romstore/batchmedia.py',
+            'src/romstore/cover.py', 'src/romstore/batchmedia.py',
+            # ui.py 里 `from . import vplayer`，缺了整包装完直接起不来
+            'src/romstore/vplayer.py',
             'systemd/nas-roms.service',
             'systemd/roms-fs-selfheal.service',
-            'src/systemd/roms-fs-selfheal.sh']
+            'src/systemd/roms-fs-selfheal.sh',
+            'systemd/roms-fs-watch.service',
+            'src/systemd/roms-fs-watch.sh']
     have = {rel.as_posix() for _, rel, _ in items}
     missing = [n for n in need if n not in have]
     if missing:

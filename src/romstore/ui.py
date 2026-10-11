@@ -1,23 +1,41 @@
 # -*- coding: utf-8 -*-
 """SDL2 中文界面
 
-屏幕 640x480（R36S），布局：
-  ┌ 顶栏 52px  标题 + 索引概况
-  ├ 列表区     滚动，每行 30px，约 12 行
+屏幕 640x480（R36S）。**游戏页是双栏**（0.5.0 起）：
+  ┌ 顶栏 52px  系统名 + 游戏数
+  ├ 卡片网格区      │ 右栏详情区（常驻 DETAIL_W=232）
+  │ 封面卡片 5x3   │ 游戏标题（两行）
+  │ 选中项高亮边框   │ 已安装 / 多碟 标签
+  │ 已装的有绿点     │ 视频预览区（16:9 画面 + 播放按钮）
+  │                │ 简介正文（右摇杆上下滚动）
   └ 底栏 44px  按键提示
 
+系统页仍是单列列表（只几十行，不需要网格）。
+
 按键（掌机没有键盘，全部动作都有手柄绑定）：
-  十字键/左摇杆  上下移动      A            确认 / 进入
-  B              返回          L1 / R1      上/下翻页
-  X              安装          Y            卸载
-  Start          菜单（重扫 NAS / 修改商店源 / 退出商店）
+  游戏页  十字键/左摇杆  网格内二维移动（到边停住，**不绕回**）
+          右摇杆上下     滚动右栏简介（**独立于网格导航**，互不干扰）
+          A            安装          X            全屏播放预览视频
+          Y            卸载          B            返回系统页
+          L1 / R1      上/下翻页     Start        菜单（重扫 / 换源 / 退出）
+  系统页  十字键  上下移动    A  进入    B  返回
 
-注意 X 在**列表页**是安装、在**详情页**是「播放预览视频」—— 详情页的 A 才是安装。
-这样设计是因为详情页已经有封面预览，把"看动态预览"放在同一个位置上最顺手。
+**A 和 X 在所有层级含义一致**（0.4.2 时 X 在列表页是安装、详情页才是播放，
+两个层级含义不同很容易按错；0.5.0 没有详情页了，统一掉）。
 
-预览视频怎么播（详情页按 X）：掌机没有 X11/Wayland，本进程又占着 KMS 显示，
+**选中态只用 2px 亮边框表示，不铺色块**（0.5.0 二轮）：早先在选中卡片下面
+铺一片蓝底，等于拿蓝方片盖住封面 —— 封面恰恰是浏览时最有用的识别信息。
+
+**正文用 13px 小字**（f_tiny）：16px 在 640x480 上偏大，卡片标题两行就占 32px、
+右栏简介一屏只剩 8 行，能看到的字太少。13px 是文泉驿仍能认读汉字的下限。
+
+封面与简介**不在主线程加载**（单张封面从 NAS 读 + 解码实测 0.1~0.3 秒，
+一屏 15 张同步加载会冻住界面）。见 cover.py。
+
+预览视频怎么播（按 X）：掌机没有 X11/Wayland，本进程又占着 KMS 显示，
 所以走的是「本进程退出 -> 外层 RomStore.sh 用 mpv DRM 直出播放 -> 重新拉起本进程
-并恢复到该游戏详情页」这条路。请求通过退出码 42 + 请求文件传递，见 request_play()。
+并把网格光标恢复到那张卡片」这条路。请求通过退出码 42 + 请求文件传递，
+见 request_play() 与 goto_game()。
 
 软键盘（screen='kb'，掌机没键盘，所有文本都靠它输入）：
   十字键/左摇杆  选字符       A            输入该字符
@@ -26,24 +44,61 @@
 
   —— 下面这些键盘键只用于桌面调试，掌机上按不到 ——
   Enter 确认 / Esc 返回 / PageUp·PageDown 翻页 / I 安装 / D 卸载
-  M 菜单 / R 重扫 / Q 退出
+  B·N 滚动简介（等价于右摇杆上下） / M 菜单 / R 重扫 / Q 退出
 """
 import os
 import threading
 import time
 
 from . import config
+from . import cover as cover_mod
 from . import index as idx
 from . import install as inst
-from . import media as media_mod
-from . import meta
 from . import sdl
 from . import source as src
+from . import vplayer as vplayer_mod
 
 W, H = 640, 480
 HEADER_H = 52
 FOOTER_H = 44
 ROW_H = 30
+
+# ---- 卡片网格 + 右栏详情（0.5.0 布局）----------------------------------
+#  顶栏
+# ┌──────────────────────────────┬─────────────┐
+# │ 卡片 x N 列（封面 + 标题）      │ [标签] 游戏标题│
+# │                              │ 视频预览区   │
+# │                              │ 简介（可滚动）│
+# └──────────────────────────────┴─────────────┘
+#  底栏
+DETAIL_W = 232      # 右栏宽度
+PAD = 10            # 网格左边距
+CARD_GAP = 8        # 卡片间距
+# 卡片底部标题**两行**的高度。字从 16px 降到 13px 后，行高从 16 降到 15，
+# 两行 30px 就够（比原来 32 少 2px，15 张/屏的布局仍成立）。
+CARD_TEXT_H = 30
+# 卡片封面区取 **1:1**，不是游戏封面常见的 3:4 竖版。这是算出来的：
+# 640x480 扣掉顶栏/底栏只剩 378px 高，5 列卡宽 71px。
+#   3:4 竖版封面 + 两行标题 = 卡高 126 -> 只放得下 2 行 = 每屏 10 款
+#   1:1      封面 + 两行标题 = 卡高 101 -> 放得下   3 行 = 每屏 15 款
+# 竖版封面放进 1:1 的框会被 letterbox 留白，但换来标题可读 + 每屏多 5 款，
+# 这个取舍明显更值（标题被截成「恶魔…」是硬伤，留白只是不好看）。
+CARD_ASPECT = 1
+# 右栏视频预览区尺寸。视频按 16:9 铺满右栏。
+# 高度 123 是量出来的：右栏共 376px，标题(最多两行 48)+视频(123)+分隔(10)
+# 之后简介还剩约 175px = 11 行，够看也够滚。再高就把简介挤没了。
+# 宽度 = DETAIL_W(232) - 左边距(10) - 分隔线占位(4) = 218。
+# ⚠️ 这个 218 必须和 ffmpeg 的 scale 目标一致，否则画面会被横向裁掉一条。
+PREVIEW_W = 218
+PREVIEW_H = 123
+
+# **封面缩略图的规范化尺寸**。后台加载器按这一个尺寸解码网格封面，
+# 一款游戏只解码一次，右栏预览区在抽帧就绪前也复用它做占位。
+# 取 5 列布局下卡片的内区尺寸，见 _grid_metrics()。
+# ⚠️ 视频帧是**另一个尺寸**（PREVIEW_W x PREVIEW_H），走 ffmpeg 抽帧时
+# 单独解码 —— 两者共用一个尺寸会把画面拉变形。
+CARD_IMG_W = 67
+CARD_IMG_H = 67
 
 # ---- 「播放预览视频」的进程间协议 -------------------------------------------
 # 本进程占着 KMS/DRM 显示，没法在自己进程里解视频（掌机没有 python 解码器绑定），
@@ -66,6 +121,11 @@ TEXT_DIM = (150, 150, 150)
 TEXT_MUTE = (110, 110, 110)
 ACCENT = (255, 186, 92)
 GREEN = (138, 214, 138)
+# rect()/fill() 要的是 ARGB 整数，而 ACCENT/GREEN/WARN 这些是 RGB 元组
+# （txt() 用的）。直接混用会 TypeError，真机上才发现 —— 所以统一走 argb()。
+def argb(rgb, a=255):
+    return ((a << 24) | (rgb[0] << 16) | (rgb[1] << 8) | rgb[2])
+
 WARN = (240, 200, 110)
 RED = (238, 122, 122)
 WHITE = (255, 255, 255)
@@ -109,22 +169,32 @@ SRC_ACTIONS = [
 
 
 def wrap(text, fonts, maxw, maxlines=99):
-    """按像素宽度对中文做换行（中文按字符切，英文按词尽量切）"""
+    """按像素宽度对中文做换行（中文按字符切，保留原文的换行）
+
+    **宽度是累加的，不重算整串**。早先每个字符都调 `fonts.width(cur + ch)`
+    把已累积的整行重新量一遍，那是 O(n^2)；真机实测一条 40 字简介要
+    **30 毫秒**，而右栏每帧都要重排一次 —— 30fps 下光这一项就吃掉九成 CPU。
+    改成逐字符量自身宽度再累加，同一段文字降到 0.1 毫秒量级。
+    """
     lines = []
     for para in text.split('\n'):
         para = para.strip()
         if not para:
             continue
         cur = ''
+        w = 0
         for ch in para:
-            if fonts.width(cur + ch) <= maxw:
+            cw = fonts.width(ch)
+            if w + cw <= maxw:
                 cur += ch
+                w += cw
             else:
                 if cur:
                     lines.append(cur)
                 cur = ch
+                w = cw
                 if len(lines) >= maxlines:
-                    break
+                    return lines[:maxlines]
         if cur:
             lines.append(cur)
         if len(lines) >= maxlines:
@@ -147,6 +217,10 @@ class App(object):
         self.f_row = sdl.Fonts(self.b, font_path, 20)
         self.f_small = sdl.Fonts(self.b, font_path, 16)
         self.f_big = sdl.Fonts(self.b, font_path, 30)
+        # f_tiny（13px）：0.5.0 二轮按反馈加的。16px 在 640x480 上做正文偏大，
+        # 卡片标题两行就占 32px、右栏简介一屏只剩 8 行 —— 一屏能看到的字太少。
+        # 13px 是文泉驿在这个分辨率下**仍能认读汉字**的下限（12px 开始糊）。
+        self.f_tiny = sdl.Fonts(self.b, font_path, 13)
 
         self.canvas = sdl.Canvas(self.b, self.ww, self.wh)
         self.imgs = sdl.ImageCache(self.b)
@@ -169,15 +243,15 @@ class App(object):
         self.games = []
         self.game_sel = 0
         self.game_top = 0
-        self.detail_game = None
-        self.detail_desc = ''
-        self.detail_scroll = 0
+        # 0.5.0：详情不再是独立页面，而是网格右栏的常驻内容，
+        # 所以没有 detail_game / detail_scroll 这类状态了。
         self.msg = None
         # Start 菜单（Start/Select 打开）：掌机没有键盘，退出/重扫/换源都收在这里
         self.menu_open = False
         self.menu_sel = 0
         self.menu_items = [('refresh', '重扫 NAS'),
                            ('source', '修改商店源'),
+                           ('sound', '预览声音：开'),   # 标签随状态变，见 render_menu
                            ('quit', '退出商店')]
 
         # 商店源设置（source.json 是唯一真相，开机挂载脚本也读它）
@@ -195,9 +269,27 @@ class App(object):
         self.running = True
         self.exit_code = 0          # 非 0 时由 run.py 透传给外层 shell（见 EXIT_PLAY）
         self.conn = None
-        self.desc_cache = {}
         self.installed_cache = {}
-        self.video_cache = {}       # 游戏 id -> 预览视频路径或 None（详情页每帧都要问）
+        self.desc_lines_cache = {}   # (游戏id, 宽, 行数) -> 已排好版的简介行
+        # 右栏简介的滚动位置（首行索引）。右摇杆上下 / B、N 键改变它；
+        # 换游戏时归零，否则从上一个游戏滚到一半的位置看下一个游戏会莫名其妙。
+        self.desc_scroll = 0
+        # 卡片/右栏标题的排版缓存（游戏id, 卡宽, 'card'|'detail'）-> 行列表。
+        # 文本固定、宽度固定，排一次就够；不缓存的话每帧要逐字量像素宽度。
+        self.card_title_cache = {}
+        # 后台加载器：封面解码/缩放与简介解析都在 worker 线程，
+        # 主线程只 blit 和查表（详见 cover.py 顶部的线程约束说明）
+        self.covers = cover_mod.CoverLoader(self.b, CARD_IMG_W, CARD_IMG_H)
+        self.descs = cover_mod.DescLoader()
+        # 右栏视频**播放器**（vplayer）：一个常驻 ffmpeg 管道 + 一个 worker，
+        # 随「当前选中项」走。跟封面加载器完全独立 ——
+        # 封面是「加载一次的资源」，视频是「一直在放的内容」。
+        self.vplayer = vplayer_mod.VideoPlayer(self.b, PREVIEW_W, PREVIEW_H)
+        # ROM 文件大小：后台 scandir 整个系统目录一次建表（实测 0.1 秒），
+        # 之后每帧查表是 O(1)。逐个 getsize 是 10.7ms/款，绝不能放主线程。
+        self.sizes = cover_mod.SizeLoader()
+        # 多碟游戏的总量算一次就缓存住，避免每帧重复求和
+        self._size_cache = {}
 
         self._open_index()
 
@@ -229,6 +321,25 @@ class App(object):
         self.games = list(idx.games_of(self.conn, s['nas_dir'], 0, 5000))
         self.game_sel = 0
         self.game_top = 0
+        self.desc_scroll = 0
+        # 换系统 = 换一批素材与 metadata，两个加载器都要清干净再起新的。
+        # 视频播放器也要停：gid 会撞车（游戏 id 是全局自增，但同一个 id
+        # 在新旧列表里指向不同游戏），不主动停就会接着播上一套系统的画面。
+        self.covers.clear()
+        self.descs.clear()
+        self.sizes.clear()
+        self._size_cache = {}
+        self.vplayer.set(None, None)
+        self.desc_lines_cache = {}
+        self.card_title_cache = {}
+        self.descs.start(s['nas_dir'],
+                         [(g['id'], g['title']) for g in self.games])
+        # 后台建大小表。**要把这个系统所有游戏用到的 src_dir 都扫上** ——
+        # 同一 ES 系统拆到多个 NAS 目录时（SS / SS plus）漏扫就查不到大小。
+        # 表回来之前右栏**不显示**大小（而不是显示 0 或 ?），
+        # 实测 PSP/GBA 都是 0.1 秒，用户基本感知不到这段空窗。
+        self.sizes.start(s['nas_dir'],
+                         set(g['src_dir'] or s['nas_dir'] for g in self.games))
 
     def stats_line(self):
         try:
@@ -407,15 +518,28 @@ class App(object):
             self.txt_r(sub, self.ww - 16, 14, TEXT_DIM, self.f_small)
 
     def footer(self, hints):
+        """底栏按键提示。用 f_tiny（13px）：网格屏要摆 6 组提示，
+        16px 下一行塞不下，而且底栏字大反而抢卡片标题的视觉重心。
+
+        每项的宽度**每帧只量一次**并累加，不做「量两遍再比较」——
+        Fonts.width() 要进 TTF_SizeUTF8，早先逐项调两遍让底栏成了
+        帧时间的可见开销，而这里只是要判断放不放得下。
+        """
+        f = self.f_tiny
         y0 = self.wh - FOOTER_H
         self.canvas.rect(0, y0, self.ww, FOOTER_H, HEADER_BG)
         self.canvas.rect(0, y0, self.ww, 2, 0xFF3A3A3A)
         x = 14
+        limit = self.ww - 12
         for key, label in hints:
-            self.txt(key, x, y0 + 10, ACCENT, self.f_small)
-            x += self.f_small.width(key) + 6
-            self.txt(label, x, y0 + 10, TEXT_DIM, self.f_small)
-            x += self.f_small.width(label) + 18
+            kw = f.width(key)
+            lw = f.width(label)
+            # 放不下就整体停手，不要让最后几项糊到屏幕外面去
+            if x + kw + lw > limit:
+                break
+            self.txt(key, x, y0 + 14, ACCENT, f)
+            self.txt(label, x + kw + 6, y0 + 14, TEXT_DIM, f)
+            x += kw + 6 + lw + 18
 
     def draw_sel_bar(self, y):
         self.canvas.rect(8, y - 3, self.ww - 16, ROW_H, SEL_BG)
@@ -450,7 +574,31 @@ class App(object):
                        self.ww - 20, self.wh - FOOTER_H - 22, TEXT_MUTE, self.f_small)
         self.footer([('A', '进入'), ('L1/R1', '翻页'), ('Start', '菜单')])
 
-    # ------------------------------------------------------------ 游戏屏
+    # ------------------------------------------------------------ 游戏屏（卡片网格 + 右栏详情）
+    def _grid_metrics(self):
+        """算网格的列数、可见行数，以及**右栏的起始 x**
+
+        640x480 减去顶栏/底栏，左栏留给网格，右栏 DETAIL_W 给详情。
+        卡片按 3:4 竖版封面比例（游戏封面几乎都是这个比例）。
+
+        **右栏 x 必须在这里一并算出来**：早先在 render_games 里另算一遍，
+        两处的 PAD 数法不一致，网格右边正好压掉右栏分隔线 10 px。
+        同一份几何数据只算一次，才不会这类 bug 再回来。
+        """
+        left_w = self.ww - DETAIL_W - PAD * 2
+        avail_h = self.wh - HEADER_H - FOOTER_H - 6
+        # 先按 5 列试，放得下就用 5 列（每屏 15 张，比 4 列翻页少得多）
+        for cols in (5, 4, 3):
+            cw = (left_w - CARD_GAP * (cols - 1)) // cols
+            ch = cw + CARD_TEXT_H          # 封面 1:1，见 CARD_ASPECT
+            rows = (avail_h - 4) // (ch + CARD_GAP)
+            if rows >= 2:
+                detail_x = PAD * 2 + cols * cw + (cols - 1) * CARD_GAP
+                return cols, max(1, rows), cw, ch, detail_x
+        cw = max(1, left_w // 3)
+        detail_x = PAD * 2 + cw
+        return 1, 1, cw, cw * 4 // 3 + CARD_TEXT_H, detail_x
+
     def render_games(self):
         s = self.current_system()
         if not s:
@@ -462,31 +610,288 @@ class App(object):
             self.txt('该系统没有可安装的游戏。', 20, 120, WARN, self.f_row)
             self.footer([('B', '返回')])
             return
-        top = max(0, min(self.game_top, len(self.games) - VIS_ROWS))
-        self.game_top = top if len(self.games) > VIS_ROWS else 0
-        y = HEADER_H + 8
-        for i in range(top, min(top + VIS_ROWS, len(self.games))):
-            g = self.games[i]
-            if i == self.game_sel:
-                self.draw_sel_bar(y)
-            col = TEXT if i == self.game_sel else TEXT_DIM
-            self.txt(g['title'], 22, y, col, self.f_row)
-            tags = []
-            if g['is_multi']:
-                tags.append('多碟')
-            if g['has_boxart']:
-                tags.append('封面')
-            if self.is_installed(g):
-                tags.append('已装')
-            if tags:
-                self.txt_r('/'.join(tags), self.ww - 20, y + 2,
-                           GREEN if '已装' in tags else TEXT_MUTE, self.f_small)
-            y += ROW_H
-        if len(self.games) > VIS_ROWS:
-            self.txt_r('%d/%d' % (self.game_sel + 1, len(self.games)),
-                       self.ww - 20, self.wh - FOOTER_H - 22, TEXT_MUTE, self.f_small)
-        self.footer([('A', '详情'), ('X', '安装'), ('Y', '卸载'),
-                     ('L1/R1', '翻页'), ('B', '返回'), ('Start', '菜单')])
+
+        cols, rows, cw, ch, detail_x = self._grid_metrics()
+        per_page = cols * rows
+        # 让选中项尽量留在中间一行，翻页时视线不用大���跑
+        top = self.game_sel - per_page // 2
+        max_top = max(0, len(self.games) - per_page)
+        top = max(0, min(top, max_top))
+        self.game_top = top
+
+        # 通知后台把可见卡片（外加下一屏预取）去加载 —— 每帧调用，必须便宜
+        self.covers.pump(self.games, top, per_page, self.game_sel)
+        # 告诉视频播放器该播哪一款。set() 内部有「没变就直接返回」的
+        # 判断，所以每帧调它零成本 —— 只有换选中项时才会重起 ffmpeg。
+        g = self.games[self.game_sel]
+        self.vplayer.set(g['id'], self.video_of(g))
+
+        for k in range(per_page):
+            i = top + k
+            if i >= len(self.games):
+                break
+            cx = PAD + (k % cols) * (cw + CARD_GAP)
+            cy = HEADER_H + 4 + (k // cols) * (ch + CARD_GAP)
+            self._draw_card(self.games[i], cx, cy, cw, ch, i == self.game_sel)
+
+        # 右栏（x 由 _grid_metrics 给出，和网格用的是同一份几何数据）
+        self._draw_detail(detail_x, HEADER_H + 4, DETAIL_W,
+                          self.wh - HEADER_H - FOOTER_H - 8)
+
+        self.txt_r('%d/%d' % (self.game_sel + 1, len(self.games)),
+                   self.ww - DETAIL_W - 12, self.wh - FOOTER_H - 22,
+                   TEXT_MUTE, self.f_small)
+        # 视频是否存在也是后台查的。还没查完时**不能**直接说「无预览」——
+        # 那是在替后台下结论。按住不动等一秒就会变成正确的字。
+        g = self.games[self.game_sel]
+        if self.video_of(g):
+            play = '全屏预览'
+        elif self.covers.ready(g['id']):
+            play = '无预览'
+        else:
+            play = '载入中'
+        self.footer([('A', '安装'), ('X', play), ('Y', '卸载'),
+                     ('右摇杆', '简介'), ('L1/R1', '翻页'), ('B', '返回')])
+
+    def _cached_lines(self, key, text, maxw, maxlines, font=None, cap=400):
+        """按 key 缓存 wrap 的结果，超上限时淘汰**最旧的一半**而不是整表清空
+
+    整表清空看着简单，代价很大：浏览时标题缓存会稳步涨到上限，一旦清空，
+    接下来每帧都要把当前 15 张卡片的标题重排一遍 —— 实测这一下就是
+    100 多毫秒，整帧直接掉出 30fps 预算。淘汰一半则只损失一点命中率，
+    而**刚看过的标题总是最新的**，不会立刻又被清。
+    """
+        lines = self.card_title_cache.get(key)
+        if lines is not None:
+            return lines
+        f = font or self.f_tiny
+        lines = wrap(text, f, maxw, maxlines)
+        if len(self.card_title_cache) >= cap:
+            for k in list(self.card_title_cache.keys())[:cap // 2]:
+                self.card_title_cache.pop(k, None)
+        self.card_title_cache[key] = lines
+        return lines
+
+    def _draw_card(self, g, x, y, cw, ch, selected):
+        """一张卡片：封面 + 标题（+ 已装/多碟角标）
+
+        选中态 = **只画框**，不铺蓝底。早先用 0xFF2C3A55 整块铺底，
+        等于拿一张蓝方片盖住封面 —— 恰好把「用封面认游戏」这件事废掉了，
+        而封面正是这个商店里最有用的识别信息。现在底板对选中与否完全一致，
+        只靠 2px 亮边框区分。
+        """
+        img_h = int(cw / float(CARD_ASPECT)) + 2
+        # 卡片底板：选中与否**完全一样**，都是同一层浅底
+        self.canvas.rect(x, y, cw, ch, 0xFF262626)
+        # 封面区
+        self.canvas.rect(x + 2, y + 2, cw - 4, img_h - 4, 0xFF1A1A1A)
+        surf = self.covers.thumb(g['id'])
+        if surf is not None:
+            sw, sh = surf.contents.w, surf.contents.h
+            self.canvas.blit(surf, x + 2 + ((cw - 4) - sw) // 2,
+                             y + 2 + ((img_h - 4) - sh) // 2)
+        else:
+            # 还在加载：给个「载入中」而不是留白，避免误以为没封面
+            if not self.covers.ready(g['id']):
+                self.txt_r('…', x + cw - 8, y + img_h // 2 - 8, TEXT_MUTE,
+                           self.f_small)
+
+        # 已安装角标：右上角一个小绿点，比写「已装」两个字省地方
+        if self.is_installed(g):
+            self.canvas.rect(x + cw - 12, y + 6, 6, 6, argb(GREEN))
+
+        # 标题**两行**。单行在 71px 宽的卡片里会被截成「恶魔…」，
+        # 完全看不出是哪款游戏 —— 对一个浏览 751 款游戏的商店来说这是硬伤。
+        # 封面按 1:1 给，下面两行 13px 文字（0.5.0 二轮由 16px 调小）。
+        #
+        # **必须缓存**：标题是固定文本，卡宽也固定，排一次就够。
+        # 早先每帧对 15 张卡片各跑一次 wrap，而 wrap 要逐字量像素宽度
+        # （真机 cProfile：10 帧里 Fonts.width() 被调 1720 次，
+        #   是仅次于 blit 的第二大热点）。改成按 (游戏id, 卡宽) 缓存后归零。
+        key = (g['id'], cw, 'card')
+        lines = self._cached_lines(key, g['title'], cw - 8, 2)
+        ty = y + img_h + 1
+        for ln in lines:
+            self.txt(ln, x + 4, ty, WHITE if selected else TEXT_DIM, self.f_tiny)
+            ty += 15
+        if g['is_multi']:
+            # 「多碟」角标放卡片右上角，和「已装」绿点分列两侧
+            self.txt_r('碟', x + cw - 5, y + 4, WARN, self.f_small)
+
+        if selected:
+            # 2px 亮边框（画四条，避免 rect 只填一圈导致边缘发虚）
+            e = SEL_EDGE
+            self.canvas.rect(x - 2, y - 2, cw + 4, 2, e)          # 上
+            self.canvas.rect(x - 2, y + ch, cw + 4, 2, e)         # 下
+            self.canvas.rect(x - 2, y - 2, 2, ch + 4, e)          # 左
+            self.canvas.rect(x + cw, y - 2, 2, ch + 4, e)         # 右
+
+    def _draw_detail(self, x, y, w, h):
+        """右栏：状态标签 + 标题 + **视频预览区** + 简介（可滚动）
+
+        0.5.0 按反馈迭代：
+          - 视频区**不再塞封面图**，整块就是视频画面（16:9）。
+            早先左封面右说明的排法把视频压成半张图，而封面在左栏已经有了。
+          - 简介移到视频**正下方**，右摇杆上下滚动。
+          - 画面上**不再压字幕条**（那行「X 全屏预览」看着像视频被截掉一块），
+            按键提示交给底部状态栏。
+          - 状态标签提到标题**前面**、与标题同高，省下一整行 28px ——
+            简介区是按剩余高度算的，这 28px 自动变成多两行正文。
+        """
+        g = self.games[self.game_sel]
+        self.canvas.rect(x, y, 1, h, 0xFF3A3A3A)      # 分隔线
+        x += 10
+        w -= 14
+        cur = y + 2
+
+        # ---- 标题：最多两行，占满整行宽度 ----
+        tkey = (g['id'], w, 'detail')
+        title_lines = self._cached_lines(tkey, g['title'], w, 2, self.f_row)
+        for i, ln in enumerate(title_lines):
+            self.txt(ln, x, cur + i * 24, ACCENT, self.f_row)
+        cur += len(title_lines) * 24
+
+        # ---- 状态标签行：标题**下方**，右侧显示文件大小 ----
+        # 色块高度不能想当然。早先取 20px，可 f_small(16) 的**实际渲染高度
+        # 是 24px**（TTF_FontHeight 返回 24，真机实测 surface 就是 48x24），
+        # 于是「未安装」三个字上下都溢出底色 —— 用户反馈「字体超出底色块」。
+        # 现在块高直接取 f_small.line_h：字面高度即块高，绝不会再溢出。
+        # 宽度也按实测字宽 + 左右各 6px 内边距，不再硬编码。
+        bh = self.f_small.line_h
+        bx = x
+        if self.is_installed(g):
+            label, fg, bg = '已安装', GREEN, 0xFF2C4A2C
+        else:
+            label, fg, bg = '未安装', TEXT_DIM, 0xFF3A3A3A
+        bw = self.f_small.width(label) + 12
+        self.canvas.rect(bx, cur, bw, bh, bg)
+        self.txt(label, bx + 6, cur, fg, self.f_small)
+        bx += bw + 6
+        if g['is_multi']:
+            bw2 = self.f_small.width('多碟') + 12
+            self.canvas.rect(bx, cur, bw2, bh, 0xFF4A3A2C)
+            self.txt('多碟', bx + 6, cur, WARN, self.f_small)
+            bx += bw2 + 6
+
+        # 大小右对齐到右栏边缘。查不到就**什么都不画** —— 在后台统计表
+        # 回来之前显示「?」会让人以为游戏真的没有大小。
+        nbytes = self.sizes.lookup(g, self._size_cache)
+        if nbytes is not None:
+            self.txt_r(inst.human(nbytes), x + w, cur, TEXT_MUTE, self.f_small)
+        cur += bh + 6
+        
+        # ---- 视频预览区：整块 16:9 真实画面（抽帧自预览视频）----
+        cur = self._draw_preview(g, x, cur, w)
+        cur += 8
+
+        # ---- 简介：视频下方，右摇杆滚动 ----
+        self.canvas.rect(x, cur, w, 2, 0xFF3A3A3A)
+        cur += 8
+        # 三态要分清：**还没加载完** / **加载完了但确实没有** / **有内容**。
+        # 早先这里写成「desc 为空就显示没有简介」，结果加载中也会显示
+        # 「（这个游戏没有简介）」，两行自相矛盾的话同时出现在屏幕上。
+        desc = self.descs.get(g['id'])
+        if desc is None:
+            self.txt('简介载入中…', x, cur, TEXT_MUTE, self.f_small)
+        elif not desc:
+            self.txt('（这个游戏没有简介）', x, cur, TEXT_MUTE, self.f_small)
+        else:
+            body_h = y + h - cur - 18      # 留 18px 给底部的滚动指示条
+            maxlines = max(1, body_h // 15)
+            # **整段**排版（最多 200 行），而不是只排可视的那些 ——
+            # 滚动范围取决于总行数，只排 maxlines 行就不知道后面还有多少。
+            # 结果按 (游戏, 宽度) 缓存：换游戏才重排一次，之后每帧只是
+            # 把算好的行贴上去。不缓存的话每帧都要重跑一遍 wrap，
+            # 而 wrap 要逐字测量像素宽度（真机 cProfile 的第二大热点）。
+            fk = (g['id'], w, 'full')
+            full = self.desc_lines_cache.get(fk)
+            if full is None:
+                full = wrap(desc, self.f_tiny, w, 200)
+                # 上限 8 是照着「只有当前这一款要排」定的，但浏览时
+                # 每款都排一次、两次就撑爆并被整表清掉 —— 下一款又得重排。
+                # 给到 32 项（约 32 款游戏的简介行，内存几百 KB），
+                # 上限到才淘汰最旧的一半。左右移动回看时几乎全命中。
+                if len(self.desc_lines_cache) >= 32:
+                    for k in list(self.desc_lines_cache.keys())[:16]:
+                        self.desc_lines_cache.pop(k, None)
+                self.desc_lines_cache[fk] = full
+            total = len(full)
+            start = self._clamp_desc_scroll(self.desc_scroll, total, maxlines)
+            self.desc_scroll = start
+            for i in range(maxlines):
+                if start + i >= total:
+                    break
+                self.txt(full[start + i], x, cur, TEXT_DIM, self.f_tiny)
+                cur += 15
+            self._draw_scroll_hint(x, y + h - 16, w, start, total, maxlines)
+
+    def _draw_preview(self, g, x, y, w):
+        """视频预览区（16:9），返回下一行的 y
+
+        显示的是**正在播放的视频画面**（vplayer 用一个常驻 ffmpeg 管道
+        持续供帧，这里贴的是最新一帧），不是封面也不是静止截图。
+        换选中项时 vplayer 会自己重起管道，这里不用管。
+        """
+        ph = PREVIEW_H
+        self.canvas.rect(x, y, w, ph, 0xFF101010)
+        # **必须传 gid**：切换游戏后 worker 可能还在收上一款的尾帧，
+        # vplayer.frame(gid) 会把不属于当前游戏的帧挡掉，
+        # 否则「切了游戏却还在播上一个视频」。
+        frame = self.vplayer.frame(g['id'])
+        if frame is not None:
+            sw, sh = frame.contents.w, frame.contents.h
+            self.canvas.blit(frame, x + (w - sw) // 2, y + (ph - sh) // 2)
+            # 这里**不要**再压半透明字幕条。早先为了「X 全屏预览」这行
+            # 提示，在画面最底下盖了 20px 的黑条，结果用户看到的正是
+            # 「视频被截掉下方一块」—— 实际是提示条压住了画面，
+            # 而全屏预览的按键提示底部状态栏本来就有（footer 的 X 项）。
+            return y + ph
+
+        # 还没出第一帧。分清「正在起播」和「确实没有片源」——
+        # 后者只字未提视频路径，前者也还没查出来（video_of 为 None）。
+        has_video = bool(self.video_of(g))
+        surf = self.covers.thumb(g['id'])
+        if surf is not None:
+            sw, sh = surf.contents.w, surf.contents.h
+            self.canvas.blit(surf, x + (w - sw) // 2, y + (ph - sh) // 2)
+        if has_video:
+            self.canvas.rect(x, y, w, ph, 0x99000000)   # 半透明盖住封面
+            self.txt('正在播放预览…', x + w // 2 - 52, y + ph // 2 - 8,
+                     TEXT_DIM, self.f_small)
+        else:
+            if self.covers.ready(g['id']):
+                self.txt('没有预览视频', x + w // 2 - 42, y + ph // 2 - 8,
+                         TEXT_MUTE, self.f_small)
+            else:
+                self.txt('载入中…', x + w // 2 - 28, y + ph // 2 - 8,
+                         TEXT_MUTE, self.f_small)
+        return y + ph
+
+    def _draw_scroll_hint(self, x, y, w, start, total, maxlines):
+        """简介滚动指示条：只在真的需要滚时才画
+
+        居中要量文字宽度，但文案只有「start+1/total」这一种，
+        量过的结果按 (文案, 区域宽度) 缓存 —— 不然每帧都进 TTF_SizeUTF8。
+        """
+        if total <= maxlines:
+            return
+        # 上/下箭头：▲ 表示上面还有，▼ 表示下面还有
+        if start > 0:
+            self.txt('▲', x, y, ACCENT, self.f_tiny)
+        if start + maxlines < total:
+            self.txt_r('▼', x + w, y, ACCENT, self.f_tiny)
+        msg = '%d/%d' % (start + 1, total)
+        ck = (msg, w)
+        tw = self.card_title_cache.get(ck)
+        if tw is None:
+            tw = self.f_tiny.width(msg)
+            self.card_title_cache[ck] = tw
+        self.txt(msg, x + w // 2 - tw // 2, y, TEXT_MUTE, self.f_tiny)
+
+    def _clamp_desc_scroll(self, val, total, maxlines):
+        """把滚动位置夹到合法范围（越界时贴边，不回弹）"""
+        maxstart = max(0, total - maxlines)
+        return max(0, min(val, maxstart))
 
     def is_installed(self, g):
         key = g['id']
@@ -500,47 +905,22 @@ class App(object):
             self.installed_cache[key] = v
         return v
 
-    # ------------------------------------------------------------ 详情屏
-    def load_desc(self, g):
-        key = g['id']
-        if key in self.desc_cache:
-            return self.desc_cache[key]
-        d = ''
-        try:
-            mp = os.path.join(config.NAS_ROOT, g['nas_dir'], config.METADATA_NAME)
-            ds = meta.parse_descriptions(mp, {g['title']})
-            d = ds.get(g['title'], '')
-        except Exception:
-            d = ''
-        self.desc_cache[key] = d
-        return d
-
+    # ------------------------------------------------------------ 视频
     def video_of(self, g):
-        """该游戏在 NAS 上的预览视频路径；没有就返回 None
+        """该游戏的预览视频路径；没有 / 还没查出来都返回 None
 
-        结果按游戏 id 缓存 —— 详情页每帧都要问一次（底栏要显示"能不能播"），
-        而 find_video 要 listdir 一次 NAS 目录，每帧都做会明显卡顿。
+        结果由 CoverLoader 在后台查好（它找封面时顺手一起 listdir 了），
+        这里只查表 —— 绝不能在这里同步去 NAS 上找，那会卡住整个网格。
         """
-        key = g['id']
-        if key in self.video_cache:
-            return self.video_cache[key]
-        v = None
-        try:
-            v = media_mod.find_video(
-                os.path.join(config.NAS_ROOT, g['nas_dir']), g['rom_rel'] or '',
-                g['media_dir'] if 'media_dir' in g.keys() else None)
-        except Exception:
-            v = None
-        self.video_cache[key] = v
-        return v
+        return self.covers.video(g['id'])
 
     def request_play(self):
-        """详情页按 X：播放该游戏的 NAS 预览视频
+        """按 X：播放当前选中游戏的 NAS 预览视频
 
-        本进程占着 KMS 显示，没法在自己进程里放视频，所以走"退出 + 交给外层"：
+        本进程占着 KMS 显示，没法在自己进程里放视频，所以走「退出 + 交给外层」：
         写好请求文件后以 EXIT_PLAY 退出，RomStore.sh 会接手播 mpv 再把界面拉回来。
         """
-        g = self.detail_game
+        g = self.games[self.game_sel] if self.games else None
         if not g:
             return
         v = self.video_of(g)
@@ -556,75 +936,6 @@ class App(object):
             return
         self.exit_code = EXIT_PLAY
         self.running = False
-
-    def render_detail(self):
-        g = self.detail_game
-        if not g:
-            self.screen = 'games'
-            return self.render_games()
-        self.header(g['title'], g['nas_dir'])
-        srcs, total = inst.rom_sources(self.conn, g)
-
-        # 右栏：封面预览（NAS 上有图就先给用户看，装之前就能确认刮削对不对）
-        pad = 16
-        gap = 14
-        prev_w, prev_h = 150, 200
-        prev_x = self.ww - prev_w - pad
-        prev_y = HEADER_H + 10
-        surf = None
-        cov = media_mod.find_asset(
-            os.path.join(config.NAS_ROOT, g['nas_dir']), g['rom_rel'] or '',
-            'box_front', g['media_dir'] if 'media_dir' in g.keys() else None)
-        if cov[0]:
-            surf = self.imgs.thumb(cov[0], prev_w, prev_h)
-        self.canvas.rect(prev_x, prev_y, prev_w, prev_h, 0xFF232323)
-        if surf is not None:
-            sw = surf.contents.w
-            sh = surf.contents.h
-            ox = prev_x + (prev_w - sw) // 2
-            self.canvas.blit(surf, ox, prev_y + (prev_h - sh) // 2)
-        else:
-            self.txt_r('无封面', prev_x + prev_w - 6, prev_y + prev_h // 2 - 8,
-                       TEXT_MUTE, self.f_small)
-        self.canvas.rect(prev_x, prev_y, 1, prev_h, 0xFF3A3A3A)
-        self.canvas.rect(prev_x, prev_y + prev_h - 1, prev_w, 1, 0xFF3A3A3A)
-        cover_bottom = prev_y + prev_h
-
-        # 左栏：信息（宽度让出封面那一栏，长路径按像素截断）
-        info_x = 20
-        info_vx = 90
-        info_right = prev_x - gap
-        y = HEADER_H + 10
-        lines = [
-            ('系统', '%s  ->  %s' % (g['es_name'], g['es_path'])),
-            ('ROM', '%d 个文件, %s' % (len(srcs), inst.human(total))),
-            ('core', g['core'] or '-'),
-            ('状态', '已安装' if self.is_installed(g) else '未安装'),
-        ]
-        if srcs:
-            lines.insert(2, ('文件', os.path.basename(srcs[0][1])))
-        for k, v in lines:
-            self.txt(k, info_x, y, TEXT_MUTE, self.f_small)
-            self.txt(self.clip(v, info_right - info_vx), info_vx, y,
-                     TEXT if k == '状态' and '未' not in v else TEXT_DIM, self.f_small)
-            y += 22
-
-        # 分隔线以下才是简介：**必须从封面底边之后开始**，否则文字会从图后面穿过去
-        y = max(y + 6, cover_bottom + 6)
-        self.canvas.rect(pad, y, self.ww - pad * 2, 2, 0xFF3A3A3A)
-        y += 8
-        body_h = self.wh - FOOTER_H - y - 6
-        maxlines = max(1, body_h // 22)
-        wl = wrap(self.detail_desc, self.f_row, self.ww - pad * 2, maxlines + self.detail_scroll)
-        wl = wl[self.detail_scroll:self.detail_scroll + maxlines]
-        for ln in wl:
-            self.txt(ln, pad, y, TEXT_DIM, self.f_row)
-            y += 22
-        free = inst.human(inst.free_bytes(g['es_path']))
-        # 详情页的 X 不再是安装（那是 A），改成播预览视频 —— 底栏直接标出有没有片源
-        play_hint = '播放预览' if self.video_of(g) else '无预览'
-        self.footer([('A', '安装'), ('X', play_hint), ('Y', '卸载'),
-                     ('L1/R1', '滚动'), ('B', '返回'), ('', '可用 ' + free)])
 
     # ------------------------------------------------------------ 进度屏
     def render_progress(self):
@@ -788,8 +1099,6 @@ class App(object):
             self.render_systems()
         elif self.screen == 'games':
             self.render_games()
-        elif self.screen == 'detail':
-            self.render_detail()
         elif self.screen == 'progress':
             self.render_progress()
         elif self.screen == 'source':
@@ -802,6 +1111,10 @@ class App(object):
             self.render_systems()
         if self.menu_open and not self.msg:
             self.render_menu()
+        # 视频帧 blit 完了，告诉播放器这一帧可以回收。
+        # 必须在 render 末尾 —— 若在此之前就通知，worker 可能在渲染
+        # 还没读完这块 surface 时把它 free 掉（use-after-free）。
+        self.vplayer.done()
 
     # ------------------------------------------------------------ 功能菜单
     def render_menu(self):
@@ -822,6 +1135,9 @@ class App(object):
                 self.canvas.rect(bx + 8, y - 3, bw - 16, row_h - 4, SEL_BG)
                 self.canvas.rect(bx + 8, y - 3, 4, row_h - 4, SEL_EDGE)
             col = TEXT if i == self.menu_sel else TEXT_DIM
+            # 「预览声音」是个开关，标签要跟着当前状态变（开/关）
+            if _a == 'sound':
+                label = '预览声音：' + ('开' if self.vplayer.sound else '关')
             self.txt(label, bx + 24, y, col, self.f_row)
             y += row_h
         self.txt('A 选定    B 关闭', bx + 16, by + bh - 24, TEXT_MUTE, self.f_small)
@@ -858,10 +1174,10 @@ class App(object):
                                         % (r.get('rom_name', ''),
                                            inst.human(r.get('bytes')), extra),
                                 'color': GREEN}
-                    self.screen = 'detail' if self.detail_game else 'games'
+                    self.screen = 'games'
                 else:
                     self.msg = {'text': '安装失败：%s' % r.get('error'), 'color': RED}
-                    self.screen = 'detail'
+                    self.screen = 'games'
             elif kind == 'remove':
                 if not r.get('ok'):
                     self.msg = {'text': '卸载失败：%s' % r.get('error'), 'color': RED}
@@ -876,7 +1192,7 @@ class App(object):
                     self.msg = {'text': '已卸载：%s%s'
                                         % (r.get('rom_name') or '', extra),
                                 'color': GREEN}
-                self.screen = 'detail' if self.detail_game else 'games'
+                self.screen = 'games'
             elif kind == 'mount':
                 if r.get('ok'):
                     self.msg = {'text': '已连接商店源\n%s\n\n正在重新扫描索引…'
@@ -926,8 +1242,6 @@ class App(object):
             self._handle_systems(act)
         elif self.screen == 'games':
             self._handle_games(act)
-        elif self.screen == 'detail':
-            self._handle_detail(act)
 
     def _handle_menu(self, act):
         n = len(self.menu_items)
@@ -939,13 +1253,18 @@ class App(object):
             self.menu_open = False
         elif act == 'ok':
             what = self.menu_items[self.menu_sel][0]
+            if what == 'sound':
+                # 切声音不关菜单：调声音时想看着画面确认，
+                # 菜单关掉就没法连着试了。vplayer 会重建 ffmpeg 生效。
+                self.vplayer.set_sound(not self.vplayer.sound)
+                return
             self.menu_open = False
             if what == 'quit':
                 self.running = False
             elif what == 'refresh':
                 self.start_scan(auto=False)
             elif what == 'source':
-                back = self.screen if self.screen in ('systems', 'games', 'detail') \
+                back = self.screen if self.screen in ('systems', 'games') \
                     else 'systems'
                 self.open_source(back)
 
@@ -1070,62 +1389,60 @@ class App(object):
             self.sys_top = self.sys_sel - VIS_ROWS + 1
 
     def _handle_games(self, act):
+        """卡片网格的输入：二维移动，A 装 / X 播 / Y 卸，右摇杆滚简介
+
+        0.5.0 起不再有独立的详情页 —— 详情就是右栏，选中即所见。
+        所以 A 直接安装、X 直接播视频，不用先进详情页。
+        """
         n = len(self.games)
         if not n:
-            if act in ('back',):
+            if act == 'back':
                 self.screen = 'systems'
             return
-        if act == 'up':
-            self.game_sel = (self.game_sel - 1) % n
+        cols = self._grid_metrics()[0]   # 只取列数，其余字段用不到
+        sel = self.game_sel
+
+        # 右摇杆上下 = 滚动右栏简介。与网格导航互不干扰，各自独立。
+        if act == 'rscroll_down':
+            self.desc_scroll += 1
+            return
+        if act == 'rscroll_up':
+            self.desc_scroll -= 1
+            if self.desc_scroll < 0:
+                self.desc_scroll = 0
+            return
+
+        if act == 'left':
+            sel -= 1
+        elif act == 'right':
+            sel += 1
+        elif act == 'up':
+            sel -= cols
         elif act == 'down':
-            self.game_sel = (self.game_sel + 1) % n
+            sel += cols
         elif act == 'pgup':
-            self.game_sel = max(0, self.game_sel - VIS_ROWS)
+            sel -= cols * 2
         elif act == 'pgdn':
-            self.game_sel = min(n - 1, self.game_sel + VIS_ROWS)
+            sel += cols * 2
         elif act == 'back':
             self.screen = 'systems'
             return
-        elif act == 'ok':
-            self.detail_game = self.games[self.game_sel]
-            self.detail_desc = self.load_desc(self.detail_game)
-            self.detail_scroll = 0
-            self.screen = 'detail'
-            return
-        elif act == 'install':
+        elif act == 'ok':               # A = 安装
             self.start_install(self.games[self.game_sel])
             return
-        elif act == 'delete':
-            self.start_remove(self.games[self.game_sel])
-            return
-        if self.game_sel < self.game_top:
-            self.game_top = self.game_sel
-        elif self.game_sel >= self.game_top + VIS_ROWS:
-            self.game_top = self.game_sel - VIS_ROWS + 1
-
-    def _handle_detail(self, act):
-        if act == 'back':
-            self.screen = 'games'
-            return
-        if act == 'ok':
-            if self.detail_game:
-                self.start_install(self.detail_game)
-            return
-        if act == 'install':        # X：详情页里是播预览视频（列表页的 X 才是安装）
+        elif act == 'install':          # X = 全屏播放预览视频
             self.request_play()
             return
-        if act == 'delete':
-            if self.detail_game:
-                self.start_remove(self.detail_game)
+        elif act == 'delete':           # Y = 卸载
+            self.start_remove(self.games[self.game_sel])
             return
-        if act == 'up':
-            self.detail_scroll = max(0, self.detail_scroll - 1)
-        elif act == 'down':
-            self.detail_scroll += 1
-        elif act == 'pgup':
-            self.detail_scroll = max(0, self.detail_scroll - 8)
-        elif act == 'pgdn':
-            self.detail_scroll += 8
+        # 网格**不做循环绕回**：绕回会让「左移到头再右移」又跳回上一行末尾，
+        # 在二维布局里非常反直觉。到边就停住。
+        sel = max(0, min(sel, n - 1))
+        if sel != self.game_sel:
+            # 换了游戏，简介回到开头（不跟过去）
+            self.desc_scroll = 0
+        self.game_sel = sel
 
     # ------------------------------------------------------------ 主循环
     def run(self):
@@ -1145,9 +1462,16 @@ class App(object):
         return path
 
     def close(self):
+        # 后台线程是 daemon，但显式停掉更干净（不再往已释放的 SDL 上贴图）。
+        # vplayer 要排在 display.close() **之前**停 —— 它的 worker 还在
+        # 往 surface 上写东西，而那些 surface 属于已经关掉的 SDL 上下文。
+        self.covers.shutdown()
+        self.covers.clear()
+        self.sizes.clear()
+        self.vplayer.shutdown()
         if self.display:
             self.display.close()
-        for f in (self.f_title, self.f_row, self.f_small, self.f_big):
+        for f in (self.f_title, self.f_row, self.f_small, self.f_big, self.f_tiny):
             try:
                 f.close()
             except Exception:
@@ -1204,12 +1528,14 @@ def run_script(actions, dumpdir, size=(W, H)):
 
 
 def goto_game(app, gid):
-    """把 app 直接切到某个游戏 id 的详情页。成功返回 True
+    """把 app 直接定位到某个游戏 id。成功返回 True
 
     两个用途：
-      1. 无头脚本模式的 `goto:<id>`（远程验证界面，不用靠上下翻找）
+      1. 无头脚本模式的 `goto:<id>`（远程验证界面，不用靠方向键翻找）
       2. 播完预览视频后，RomStore.sh 用 `run.py --resume <id>` 把界面恢复
-         到刚才那一页 —— 否则每看一次预览就被打回最外层列表，体验很差
+         到刚才那一张卡片 —— 否则每看一次预览就被打回系统列表，体验很差
+
+    0.5.0 里落点是**网格选中项**（详情已在右栏常驻，没有独立详情页了）。
     """
     try:
         gid = int(gid)
@@ -1221,24 +1547,19 @@ def goto_game(app, gid):
         g = None
     if not g:
         return False
-    # 让当前系统/列表也指到它，返回时不会跳到别的系统
+    # 让当前系统指到它，返回时不会跳到别的系统
     for i, s in enumerate(app.sys_rows):
         if s['nas_dir'] == g['nas_dir']:
             app.sys_sel = i
             break
     app.load_games()
-    # 列表光标也对齐到它，之后按 B 退回列表时正好停在这一款上
+    # 网格光标也对齐到它，之后按 B 退回列表时正好停在这一张卡片上
     for i, gg in enumerate(app.games):
         if gg['id'] == g['id']:
             app.game_sel = i
-            if i >= VIS_ROWS:
-                app.game_top = i - VIS_ROWS + 1
-            break
-    app.detail_game = g
-    app.detail_desc = app.load_desc(g)
-    app.detail_scroll = 0
-    app.screen = 'detail'
-    return True
+            app.game_top = 0        # 渲染时会按 game_sel 重新居中
+            return True
+    return False
 
 
 # 旧名保留（无头脚本模式一路这么叫过来的）

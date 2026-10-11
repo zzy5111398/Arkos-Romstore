@@ -1,0 +1,16 @@
+[Unit]
+# /roms 只读运行期监控。与 roms-fs-selfheal.service 配套：
+#   selfheal = 开机时修一次；watch = 运行中发现并转交修复
+# 不 After=roms.mount —— 监控必须比挂载更早起来，否则开机即损坏时会漏掉。
+# 这里用 Before=roms.mount，让它尽早进入循环。
+
+[Service]
+Type=simple
+ExecStart=/opt/system/roms-fs-watch.sh
+Restart=always
+RestartSec=10
+# 监控本身极轻（一分钟一次微秒级探针），不给 CPU 上限，避免被 cgroup 掐死
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

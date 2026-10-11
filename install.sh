@@ -53,6 +53,8 @@ MOUNT_POINT="/mnt/Roms"
 # /roms 只读自愈
 HEAL_SH="/opt/system/roms-fs-selfheal.sh"
 HEAL_UNIT="/etc/systemd/system/roms-fs-selfheal.service"
+WATCH_SH="/opt/system/roms-fs-watch.sh"
+WATCH_UNIT="/etc/systemd/system/roms-fs-watch.service"
 
 # ----------------------------------------------------------------- 输出
 if [ -t 1 ]; then
@@ -538,6 +540,18 @@ else
     warn "分发包缺少自愈脚本，跳过（不影响主功能）"
 fi
 
+# 运行期只读监控：开机自愈只管开机那一次，而实测第三次事故是运行 42 分钟后
+# 才被 remount-ro 的，开机自愈根本没机会介入。这个服务补上运行期的缺口。
+if [ -r "$SRCD/systemd/roms-fs-watch.sh" ] && [ -r "$SYSD/roms-fs-watch.service" ]; then
+    bak "$WATCH_SH" "$BAK_DIR/roms-fs-watch.sh"
+    bak "$WATCH_UNIT" "$BAK_DIR/roms-fs-watch.service"
+    install -m 755 "$SRCD/systemd/roms-fs-watch.sh" "$WATCH_SH"
+    install -m 644 "$SYSD/roms-fs-watch.service" "$WATCH_UNIT"
+    ok "只读监控：$WATCH_SH"
+else
+    warn "分发包缺少只读监控脚本，跳过（不影响主功能）"
+fi
+
 if [ -r "$SYSD/50-nas-roms" ]; then
     if [ -d /etc/NetworkManager ]; then
         install -m 755 -o root -g root "$SYSD/50-nas-roms" "$DISPATCHER"
@@ -560,6 +574,13 @@ if [ -f "$HEAL_UNIT" ]; then
         ok "roms-fs-selfheal.service 已设为开机自启（掉电只读自动修复）"
     else
         warn "自愈服务 enable 失败，可稍后手动：systemctl enable roms-fs-selfheal"
+    fi
+fi
+if [ -f "$WATCH_UNIT" ]; then
+    if systemctl enable roms-fs-watch.service >/dev/null 2>&1; then
+        ok "roms-fs-watch.service 已设为开机自启（运行中只读自动发现）"
+    else
+        warn "监控服务 enable 失败，可稍后手动：systemctl enable roms-fs-watch"
     fi
 fi
 
@@ -716,6 +737,17 @@ if [ -f "$HEAL_SH" ] && command -v fsck.exfat >/dev/null 2>&1; then
     fi
 else
     v_warn "未安装 /roms 只读自愈（或系统无 fsck.exfat）—— 掉电后需手工 fsck"
+
+# 6c) 运行期只读监控
+if [ -f "$WATCH_UNIT" ]; then
+    if systemctl is-enabled roms-fs-watch.service >/dev/null 2>&1; then
+        v_ok "roms-fs-watch.service 已启用（运行中只读自动发现并修复）"
+    else
+        v_warn "roms-fs-watch.service 未启用，可手动：systemctl enable roms-fs-watch"
+    fi
+else
+    v_warn "未安装 /roms 只读监控 —— 运行中损坏需手工 SSH 排查"
+fi
 fi
 
 # 7) 图形环境（无头探针，不占屏）

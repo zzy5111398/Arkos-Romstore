@@ -37,3 +37,6 @@ desktop.ini
 *.tmp
 .idea/
 .vscode/
+
+# 开发期 UI 截图（headless 渲染抓帧用，仅本机调试看）
+.shots/

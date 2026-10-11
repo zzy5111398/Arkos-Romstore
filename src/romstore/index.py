@@ -46,7 +46,12 @@ CREATE TABLE IF NOT EXISTS games(
   core       TEXT,
   has_boxart INTEGER DEFAULT 0,
   rom_bytes  INTEGER,
-  dup        INTEGER DEFAULT 0
+  dup        INTEGER DEFAULT 0,
+  -- ROM 文件**真实**所在的 NAS 子目录。通常等于 nas_dir，
+  -- 但当一个 ES 系统被拆到多个目录（实测 SS / SS plus 共用同一份
+  -- metadata、ROM 编号互补 001-160 与 161-752）时，它指向真正有文件的那个。
+  -- 见 build() 里的 _resolve。
+  src_dir    TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_games_sys   ON games(es_path);
 CREATE INDEX IF NOT EXISTS ix_games_dir   ON games(nas_dir);
@@ -56,7 +61,7 @@ CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
 """
 
 
-SCHEMA_VERSION = '1'
+SCHEMA_VERSION = '2'
 
 
 def connect():
@@ -78,10 +83,23 @@ def connect():
             need = True
     if need:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         conn.execute("INSERT OR REPLACE INTO kv(k,v) VALUES('schema',?)",
                      (SCHEMA_VERSION,))
         conn.commit()
     return conn
+
+
+def _migrate(conn):
+    """给已存在的表补上新增的列
+
+    `CREATE TABLE IF NOT EXISTS` 在表已存在时是**空操作**，光 bump
+    SCHEMA_VERSION 不会把新列加到老库上 —— 必须显式 ALTER。
+    这里用「查 pragma 再决定」的写法，可以重复执行。
+    """
+    cols = set(r['name'] for r in conn.execute('PRAGMA table_info(games)'))
+    if 'src_dir' not in cols:
+        conn.execute('ALTER TABLE games ADD COLUMN src_dir TEXT')
 
 
 def _kv_get(conn, k, d=None):
@@ -101,6 +119,79 @@ def _priority(nas_dir):
     if 'plus' in s or ' v' in s:
         return 60
     return 10
+
+
+# 统计 ROM 存在性时要跳过的素材目录（与 cover.SizeLoader 一致）
+_MEDIA_DIRS = frozenset(('media', 'images', 'img', 'image', 'video', 'videos',
+                         'covers', 'saves', 'savestate'))
+
+
+def _file_index(nas_dir):
+    """列出 nas_dir 下所有 ROM 文件的相对路径（小写）-> 真实相对路径
+
+    递归下钻（实测 SS 里有 31 个、SS plus 里有 147 个文件放在
+    `009/xxx.chd` 这样的分层子目录里），跳过素材目录。
+    一次遍历约 0.03~0.11 秒（SMB），只在建索引时做一次。
+    """
+    root = os.path.join(config.NAS_ROOT, nas_dir)
+    out = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel_dir = os.path.relpath(dirpath, root)
+        if rel_dir == '.':
+            rel_dir = ''
+        # 就地裁剪，避免走进 media/ 这些大目录
+        keep = []
+        for d in dirnames:
+            tail = (rel_dir + '/' + d if rel_dir else d).split(os.sep)[0]
+            if tail.lower() not in _MEDIA_DIRS:
+                keep.append(d)
+        dirnames[:] = keep
+        for f in filenames:
+            rel = (rel_dir + '/' + f) if rel_dir else f
+            out[rel.lower()] = rel
+    return out
+
+
+def _resolve(nas_dir, rom, own_index, sibling_indexes):
+    """定位一个 ROM 的真实来源目录，返回 (rom_rel, src_dir)
+
+    先在本目录找；找不到就到**同一个 ES 系统的兄弟目录**里找。
+
+    ## 为什么需要这一层
+
+    实测 `SS` 与 `SS plus` 两个目录映射到同一个 ES 系统（`saturn`），
+    而且**共用完全相同的一份 metadata.pegasus.txt**（752 条逐条一致）——
+    但 ROM 文件被拆到了两边：
+
+        SS        编号 001~160（147 个文件真实存在）
+        SS plus   编号 003~752（446 个文件真实存在）
+
+    metadata 里的 `file:` 字段对两者是同一套值（都写着 `001.chd`…），
+    于是：
+      - 在 `SS` 里只有 147/752 能对上，**605 款指向不存在的文件**；
+      - 在 `SS plus` 里同理对不上另一批；
+      - 而 `_dedup` 按 `(es_path, rom 文件名)` 去重，`SS` 优先级更高，
+        导致 `SS plus` **全部 752 条被判成重复**，一个都露不出来。
+
+    用户看到的现象就是「SS 装不了、剩下的都在 SS plus 里」。
+
+    修法就是在这里跨目录回退：metadata 说的是**整个 ES 系统的清单**，
+    文件实际在哪算哪个目录的。跨目录找到后把真实目录记进 `src_dir`，
+    安装（install.rom_sources）、大小统计（cover.SizeLoader）都改用它。
+
+    兄弟目录按 `_priority` 排序后取**第一个命中的**，
+    所以原版目录（priority 10）总是优先于 plus/hack（60/80）。
+    """
+    if not rom:
+        return None, None
+    rel = rom.replace('\\', '/').lstrip('/')
+    if rel.lower() in own_index:
+        return own_index[rel.lower()], nas_dir
+    for sd, idx in sibling_indexes:
+        hit = idx.get(rel.lower())
+        if hit:
+            return hit, sd
+    return rel, nas_dir          # 都没有：保留原值，装的时候再报错
 
 
 def scan_nas():
@@ -130,6 +221,20 @@ def build(progress=None, force=False):
     dirs, err = scan_nas()
     if err:
         return {'ok': False, 'error': '无法读取 %s: %s' % (config.NAS_ROOT, err)}
+
+    # ---- 先把所有目录的 es_path 定下来，并建好文件索引 ----
+    # 必须在主循环**之前**做完：某个 ROM 到底在哪个兄弟目录里，
+    # 只有把兄弟都看过才知道（见 _resolve 的说明）。
+    # 只给「有兄弟的系统」建索引 —— 独占的系统不需要跨目录查找，
+    # 而建索引要遍历整个目录树（68 个系统全建要多花好几秒）。
+    es_of = {}
+    for d, _mt, _sz in dirs:
+        m = mapp.lookup(d)
+        if m:
+            es_of[d] = m[1]              # es_path
+    by_es = {}
+    for d, ep in es_of.items():
+        by_es.setdefault(ep, []).append(d)
 
     total = len(dirs)
     built, skipped, failed = 0, 0, []
@@ -169,21 +274,42 @@ def build(progress=None, force=False):
             failed.append((d, str(e)))
             continue
 
+        # 只有**有兄弟目录**的系统才需要文件索引。没有兄弟时保持旧行为
+        # （直接采信 metadata 的 file: 值），这样 68 个系统里绝大多数
+        # 都不必遍历目录树 —— 遍历在 SMB 上不便宜（实测每系统 0.03~0.11 秒）。
+        sibs = [sd for sd in by_es.get(es_path, []) if sd != d]
+        if sibs:
+            own_index = _file_index(d)
+            sibling_indexes = [(sd, _file_index(sd)) for sd in sibs]
+            # 先找优先级小的（原版优先于 plus/hack），保证同一款游戏
+            # 不会因为目录顺序拿到 hack 版
+            sibling_indexes.sort(key=lambda kv: (_priority(kv[0]), kv[0]))
+        else:
+            own_index = {}
+            sibling_indexes = []
+
         conn.execute('DELETE FROM games WHERE nas_dir=?', (d,))
         rows = []
+        n_moved = 0
         for g in games:
             rp = g.rom
             if g.roms:
                 rp = g.roms[0]
+            if sibling_indexes:
+                rp, sd = _resolve(d, rp, own_index, sibling_indexes)
+                if sd != d:
+                    n_moved += 1
+            else:
+                sd = d
             rows.append((
                 d, es_name, es_path, g.title, g.sort_by, rp,
                 1 if g.is_multi else 0,
                 json.dumps(g.roms, ensure_ascii=False) if g.roms else None,
-                g.media_dir(), g.core, 1 if g.has_boxart() else 0, None, 0))
+                g.media_dir(), g.core, 1 if g.has_boxart() else 0, None, 0, sd))
         conn.executemany(
             'INSERT INTO games(nas_dir,es_name,es_path,title,sort_by,rom_rel,'
-            'is_multi,roms_json,media_dir,core,has_boxart,rom_bytes,dup)'
-            ' VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)', rows)
+            'is_multi,roms_json,media_dir,core,has_boxart,rom_bytes,dup,src_dir)'
+            ' VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)', rows)
         conn.execute(
             'INSERT OR REPLACE INTO systems'
             '(nas_dir,es_name,es_path,conf,note,priority,n_games,mtime,size,built_at)'

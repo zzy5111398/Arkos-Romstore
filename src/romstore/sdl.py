@@ -57,6 +57,8 @@ K_r, K_R = 114, 82
 K_i, K_I = 105, 73
 K_d, K_D = 100, 68
 K_m, K_M = 109, 77
+K_b, K_B = 98, 66      # 键盘替代右摇杆：滚动简介（与右摇杆上下同义）
+K_n, K_N = 110, 78
 
 # SDL_GameControllerButton
 CB_A, CB_B, CB_X, CB_Y = 0, 1, 2, 3
@@ -210,6 +212,18 @@ class Bind(object):
         I.IMG_SavePNG.restype = ctypes.c_int
         I.IMG_Load.argtypes = [ctypes.c_char_p]
         I.IMG_Load.restype = ctypes.POINTER(SDL_Surface)
+        # 从**内存**解图（视频预览用）：ffmpeg 往管道吐 mjpeg 流，
+        # 我们按 SOI/EOI 标记切出一帧的字节后直接解，不必落盘再读回来。
+        # 两个符号都按「先探测再声明」处理 —— 和下面 SDL_BlitScaled 同一个
+        # 教训：ctypes 在声明时找不到符号会直接抛 AttributeError，
+        # 把整个 Bind() 拖崩，结果是**主界面都起不来**，
+        # 远不止「视频预览没有」这么简单。
+        self.has_loadrw = self._probe(I, 'IMG_Load_RW')
+        if self.has_loadrw:
+            I.IMG_Load_RW.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            I.IMG_Load_RW.restype = ctypes.POINTER(SDL_Surface)
+        else:
+            I.IMG_Load_RW = None
 
         # 封面缩放用到的那几个符号**不是所有 libSDL2 都有**。
         # 实测 r36s（ArkOS4Clone）的 libSDL2-2.0.so.0 里**没有 SDL_BlitScaled**
@@ -231,6 +245,15 @@ class Bind(object):
             S.SDL_BlitScaled.restype = ctypes.c_int
         else:
             S.SDL_BlitScaled = None
+        # 视频预览：从内存解 JPEG。RWops 只是包装一段内存，
+        # 不需要 SDL_FreeRW（由 SDL_RWFromMem 分配的那块要 free，但
+        # 短命的帧不值得为此多一层簿记 —— 见 ImageCache.load_bytes）。
+        self.has_rwfrommem = self._probe(S, 'SDL_RWFromMem')
+        if self.has_rwfrommem:
+            S.SDL_RWFromMem.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            S.SDL_RWFromMem.restype = ctypes.c_void_p
+        else:
+            S.SDL_RWFromMem = None
         S.SDL_SetColorKey.argtypes = [ctypes.POINTER(SDL_Surface), ctypes.c_int,
                                       ctypes.c_uint32]
         S.SDL_SetColorKey.restype = ctypes.c_int
@@ -334,6 +357,111 @@ class ImageCache(object):
         self._order.append(key)
         self._trim()
         return surf
+
+    def make_many(self, path, sizes):
+        """解码一次，产出多份缩略图，**不进缓存**
+
+        给后台加载线程用（见 cover.CoverLoader）。那里的关键约束是：
+        surface 由 worker 造好后交给主线程 blit，**所有权必须转移**。
+        如果走 thumb()，同一张图还会留在本对象的缓存里，将来淘汰时
+        会被二次 SDL_FreeSurface —— 那就是段错误。
+
+        sizes: [(w, h), ...]；返回等长的 surface 列表，失败的位置是 None。
+        调用方负责释放每一项。
+        """
+        if not path:
+            return [None] * len(sizes)
+        try:
+            src = self.b.img.IMG_Load(path.encode('utf-8'))
+        except Exception:
+            return [None] * len(sizes)
+        if not src:
+            return [None] * len(sizes)
+        out = []
+        try:
+            sw = src.contents.w
+            sh = src.contents.h
+            if sw <= 0 or sh <= 0:
+                return [None] * len(sizes)
+            for (w, h) in sizes:
+                if w <= 0 or h <= 0:
+                    out.append(None)
+                    continue
+                # 等比缩放到 w x h 内（letterbox），避免封面被拉变形
+                scale = min(w / float(sw), h / float(sh))
+                tw = max(1, int(sw * scale))
+                th = max(1, int(sh * scale))
+                try:
+                    if self.b.has_blitscaled:
+                        out.append(self._scale_sdl(src, tw, th))
+                    else:
+                        out.append(self._scale_py(src, tw, th))
+                except Exception:
+                    out.append(None)
+        finally:
+            self.b.sdl.SDL_FreeSurface(src)
+        return out
+
+    def load_bytes(self, data, w, h):
+        """从**内存**解一张图并缩放到 w x h，返回新 surface（所有权归调用方）
+
+        视频预览用：ffmpeg 往管道吐 mjpeg 流，一帧的字节已在手上，
+        没必要先落盘成临时文件再 IMG_Load 读回来 —— 那样每帧都要
+        建文件、fsync、删文件，在 exFAT 上是实打实的写放大。
+
+        **不进缓存**：视频每帧一个新图，缓存毫无意义且会把内存吃光。
+        返回的 surface 由调用方负责 SDL_FreeSurface。
+        """
+        if not data or not self.b.has_loadrw or not self.b.sdl.SDL_RWFromMem:
+            return None
+        src = None
+        rw = None
+        try:
+            # RWFromMem 只是**借用**这段内存，不接管所有权；
+            # 所以 buf 必须一直活到 IMG_Load_RW 返回为止（这里满足）。
+            buf = ctypes.create_string_buffer(data, len(data))
+            rw = self.b.sdl.SDL_RWFromMem(buf, len(data))
+            if not rw:
+                return None
+            src = self.b.img.IMG_Load_RW(rw, 0)
+            if not src:
+                return None
+            sw = src.contents.w
+            sh = src.contents.h
+            if sw <= 0 or sh <= 0:
+                self.b.sdl.SDL_FreeSurface(src)
+                return None
+            scale = min(w / float(sw), h / float(sh))
+            tw = max(1, int(sw * scale))
+            th = max(1, int(sh * scale))
+
+            # ---- 1:1 快路径（本项目的视频帧永远走这里）----
+            # ffmpeg 已经按 PREVIEW_W x PREVIEW_H 缩放过了，解出来的 JPEG
+            # 正好就是目标尺寸 —— tw==sw 且 th==sh，**根本不需要缩放**。
+            # 但旧代码照样把它丢进 _scale_py，那是一条纯 Python 的
+            # 「逐像素读+拼接」循环（218x123x4 ≈ 107KB，每帧要跑几万个
+            # Python 层的切片与拼接）。真机实测这一项单独就要 **80 ms/帧**，
+            # 而 20fps 的预算只有 50ms —— 也就是说光这一段就把画面拖垮了，
+            # 再叠上 ffmpeg 软解的 230%，四核 CPU 直接打满，界面卡死。
+            # 这里只需一次 SDL_ConvertSurfaceFormat（C 侧 memcpy，约 0.1ms）。
+            if tw == sw and th == sh:
+                conv, owned = self._to_argb(src)
+                self.b.sdl.SDL_FreeSurface(src)
+                # owned 为 False 表示这台机器没有 SDL_ConvertSurfaceFormat，
+                # 转换没有发生 —— 此时不能把 src 交出去（上面已 free），
+                # 返回 None 让调用方按「这帧没画面」处理。
+                return conv if owned else None
+
+            if self.b.has_blitscaled:
+                out = self._scale_sdl(src, tw, th)
+            else:
+                out = self._scale_py(src, tw, th)
+            self.b.sdl.SDL_FreeSurface(src)
+            return out
+        except Exception:
+            if src:
+                self.b.sdl.SDL_FreeSurface(src)
+            return None
 
     def _make(self, path, w, h):
         src = self.b.img.IMG_Load(path.encode('utf-8'))
@@ -501,6 +629,7 @@ class Fonts(object):
         if not self.font:
             raise RuntimeError('无法打开字体 %s: %s' % (path, b.err()))
         self._cache = {}
+        self._cw = {}          # 单字符 -> 像素宽（见 width()，排版热路径）
         self.line_h = b.ttf.TTF_FontHeight(self.font)
 
     def render(self, text, rgb):
@@ -518,11 +647,24 @@ class Fonts(object):
         return surf
 
     def width(self, text):
+        # 单字符宽度是**恒定**的（同一个字体+字号下与上下文无关），
+        # 而 ui.wrap 排版时是对**每个字符**调一次 width。
+        # 真机 cProfile：换游戏重排 15 张卡片时 10 帧调了 2752 次，
+        # 占整帧时间三分之一。中文常用字就几百个，用 dict 记住后
+        # 这些调用全部变成一次 dict 查找。
+        # ⚠️ 只能在 len==1 时用缓存：多字符串的宽度不能由单字宽度相加得出
+        #    （kerning / 连字），必须老老实实问 TTF。
+        if len(text) == 1:
+            w = self._cw.get(text)
+            if w is not None:
+                return w
         w = ctypes.c_int()
         h = ctypes.c_int()
         if self.b.ttf.TTF_SizeUTF8(self.font, text.encode('utf-8'),
                                    ctypes.byref(w), ctypes.byref(h)) != 0:
             return 0
+        if len(text) == 1:
+            self._cw[text] = w.value
         return w.value
 
     def clear(self):
@@ -626,6 +768,12 @@ class Input(object):
         self.repeat_delay = repeat_delay
         self.repeat_rate = repeat_rate
         self._last = 0.0
+        # 右摇杆**独立**一套去抖/重复状态。不能复用上面的 stick_held：
+        # 左右摇杆归零的时刻不同，共用一个状态机会出现「推右摇杆时左摇杆的
+        # 重复计时被清掉」，表现为网格导航偶尔漏一格。
+        self.rstick_held = None
+        self.rstick_since = 0.0
+        self._rlast = 0.0
         self.b.sdl.SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER)
 
     def open_controllers(self):
@@ -691,6 +839,10 @@ class Input(object):
             return 'pgup'
         if sym == K_PAGEDOWN:
             return 'pgdn'
+        if sym in (K_b, K_B):
+            return 'rscroll_up'
+        if sym in (K_n, K_N):
+            return 'rscroll_down'
         if sym in (K_q, K_Q):
             return 'quit'
         if sym in (K_r, K_R):
@@ -728,15 +880,38 @@ class Input(object):
                 self.stick_held = None
                 return None
             want = 'left' if val < 0 else 'right'
+        elif ax == AX_RIGHTY:
+            # 右摇杆上下 = 滚动右栏简介。左右轴（AX_RIGHTX）刻意不映射，
+            # 留给将来用：右摇杆在网格屏已有明确职责，不跟左摇杆抢导航。
+            if abs(val) < DEAD:
+                self.rstick_held = None
+                return None
+            return self._stick_repeat('rscroll_up' if val < 0 else 'rscroll_down',
+                                      now, right=True)
         else:
             return None
-        if self.stick_held != want:
-            self.stick_held = want
-            self.stick_since = now or 0.0
-            self._last = now or 0.0
-            return want
+        return self._stick_repeat(want, now, right=False)
+
+    def _stick_repeat(self, want, now, right=False):
+        """摇杆去抖 + 长按重复；right=True 走右摇杆那套**独立**状态。
+
+        首次推动立即返回一次（手感要跟手），之后 repeat_delay 开始连续重复、
+        间隔 repeat_rate。滚动简介必须能「按住连续滚」，一推一停没法用。
+        """
+        held, since, last = ((self.rstick_held, self.rstick_since, self._rlast)
+                             if right else
+                             (self.stick_held, self.stick_since, self._last))
         t = now or 0.0
-        if t - self.stick_since >= self.repeat_delay and t - self._last >= self.repeat_rate:
-            self._last = t
+        if held != want:
+            if right:
+                self.rstick_held, self.rstick_since, self._rlast = want, t, t
+            else:
+                self.stick_held, self.stick_since, self._last = want, t, t
+            return want
+        if t - since >= self.repeat_delay and t - last >= self.repeat_rate:
+            if right:
+                self._rlast = t
+            else:
+                self._last = t
             return want
         return None

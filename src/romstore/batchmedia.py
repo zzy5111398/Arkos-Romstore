@@ -140,8 +140,12 @@ def plan(nas_dir, es_name=None, only_missing=True):
             #   `--gaps` 跑一分钟都出不来。
             if not inst.already_installed(es_path, rom_name):
                 continue
+            # 素材跟着 ROM 文件走，所以查 g['src_dir'] 而不是本系统的 nas_dir。
+            # 一个 ES 系统拆到多个目录时（SS/SS plus、PS1/PS1 hack、DC/DC hack），
+            # 用 nas_dir 会给跨目录的那几百款全部报「NAS 上没有封面」。
+            g_sys = os.path.join(config.NAS_ROOT, g['src_dir'] or nas_dir)
             src, _rel = media_mod.find_asset(
-                nas_sys, rom_name, 'box_front',
+                g_sys, rom_name, 'box_front',
                 g['media_dir'] if 'media_dir' in g.keys() else None)
             if not src:
                 n_nocover += 1
