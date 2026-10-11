@@ -13,7 +13,7 @@ SFC 355/355、PSP 471/471、DC 104/104、GB 108/108、N64 70/70 —— **基本 
 |---|---|
 | 入口位置 | 商店详情页（`A` 安装、**`X` 播放预览**、`Y` 卸载） |
 | 片源 | NAS 上的 `media/<ROM 去扩展名>/video.*`，**不复制到掌机**（不占 SD 空间、不占下载时间） |
-| 播放引擎 | `mpv --vo=drm --ao=alsa --hwdec=auto`（本机无 X11/Wayland，只能 DRM 直出） |
+| 播放引擎 | `mpv --vo=drm --ao=alsa --hwdec=auto-safe`（本机无 X11/Wayland，只能 DRM 直出） |
 | 没有片源 | 底栏直接显示「无预览」，按 X 只提示一句，不影响安装 |
 
 **为什么要在进程外绕一圈**：商店界面自己占着 KMS/DRM 显示，而 mpv 也要用同一块屏，
@@ -31,6 +31,34 @@ SFC 355/355、PSP 471/471、DC 104/104、GB 108/108、N64 70/70 —— **基本 
 - 离线自测台新增 7 条断言（精确命中 / 大小写 / 非 video 命名 / preview.webm / 目录不存在）。
 - 曾短暂做过一个独立的「视频播放器」Options 入口，**已撤销**（改为详情页内预览）；
   `install.sh` 升级时会自动清掉旧入口，`uninstall.sh` 也仍会清理它。
+
+**新增：`/roms` 只读自愈（针对掉电导致的 FAT 表截断）**
+
+装游戏时如果报 `Errno 30 Read-only file system`，**不是商店的 bug，是 TF 卡的 exFAT
+分区被写坏了**。成因是非正常关机（掉电 / 拔卡）把 FAT 表截断，损坏的目录表一旦被读到，
+内核就会按 `errors=remount-ro` 把整个分区转只读：
+
+```
+exFAT-fs (mmcblk0p3): Volume was not properly unmounted. Some data may be corrupt.
+exFAT-fs (mmcblk0p3): error, found bogus dentry(...) beyond unused empty group(...)
+exFAT-fs (mmcblk0p3): Filesystem has been set read-only
+```
+
+现在装好 ROM 商店就带一个开机自愈脚本（`roms-fs-selfheal.service`），
+下次再遇到这种情况**开机就自动修好，不用 SSH 排查**：
+
+```
+检测到 /roms 为 ro → 停 ES 和 filebrowser → 卸载（Tools 与 roms 成对）
+→ fsck.exfat -y → sync → 重新挂载 → 补挂 /opt/system/Tools
+→ 真实写入验证 → 恢复服务
+```
+
+设计上有一条硬规矩：**自愈失败绝不能阻塞开机**。修不好就带着只读分区进桌面，
+而不是卡在黑屏。实测健康状态下 1 秒就返回，完全不打扰使用。
+
+**这是「善后」不是「预防」。** exFAT 本身没有 journal，掉电写坏 FAT 表是它的固有弱点。
+根治要么换文件系统（ext4 有 journal，但会失去 Windows 插卡直读），
+要么 —— 至少 —— **关机走正常流程，别直接断电拔卡**。
 
 ## 0.4.1 — 2026-10-11
 

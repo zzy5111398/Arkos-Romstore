@@ -48,11 +48,32 @@ PSP 471/471、DC 104/104 等，基本 100% 覆盖），本版把这段预览片�
 
 - 位置：商店详情页 —— `A` 安装、`X` 播放预览、`Y` 卸载
 - 片源：直接播 NAS 上的源文件，**不复制到掌机**（不占 SD 空间、不占下载时间）
-- 引擎：`mpv --vo=drm --ao=alsa --hwdec=auto`（本机无 X11/Wayland，只能 DRM 直出）
+- 引擎：`mpv --vo=drm --ao=alsa --hwdec=auto-safe`（本机无 X11/Wayland，只能 DRM 直出）
 - 机制：界面占着 DRM 显示、mpv 也要用同一块屏，于是界面先退出让出显示
   （退出码 42 + 请求文件），由 `RomStore.sh` 接手播放；播完用 `run.py --resume`
   把界面**恢复到原来那款游戏的详情页**
 - 没有片源时底栏显示「无预览」，按 X 只提示一句，不影响安装
+
+### 0.4.2 补充 — `/roms` 只读自愈
+
+装游戏报 `Errno 30 Read-only file system` 时，请注意**这通常不是商店的问题，
+而是 TF 卡的 exFAT 分区写坏了**。非正常关机（掉电 / 拔卡）会截断 FAT 表，
+损坏的目录表被读到后内核按 `errors=remount-ro` 把整个 `/roms` 转只读，
+于是所有写操作（装游戏、写 gamelist、导入封面）全部失败。
+
+本版起，装好就带开机自愈 `roms-fs-selfheal.service`：
+开机时若发现 `/roms` 为只读，自动停服务 → 卸载 → `fsck.exfat -y` → 重挂 → 验证 → 恢复服务。
+**修不好也不会阻塞开机** —— 最坏情况是带着只读分区进桌面，而不是卡在黑屏。
+
+手工触发或查看日志：
+
+```bash
+sudo systemctl restart roms-fs-selfheal.service   # 立即修一次
+sudo journalctl -u roms-fs-selfheal -n 50        # 看上次修了什么
+```
+
+⚠️ 这是**善后不是预防**。exFAT 无 journal，掉电损坏是它的固有弱点。
+根治要换 ext4（会失去「Windows 插卡直读」），或至少——关机走正常流程。
 
 ### 0.1.0 — P1 建店，跑通
 
