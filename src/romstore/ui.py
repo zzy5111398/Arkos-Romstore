@@ -613,7 +613,7 @@ class App(object):
 
         cols, rows, cw, ch, detail_x = self._grid_metrics()
         per_page = cols * rows
-        # 让选中项尽量留在中间一行，翻页时视线不用大���跑
+        # 让选中项尽量留在中间一行，翻页时视线不用大幅跑动
         top = self.game_sel - per_page // 2
         max_top = max(0, len(self.games) - per_page)
         top = max(0, min(top, max_top))

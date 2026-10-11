@@ -49,35 +49,144 @@
 
 ### NAS（或任何一台开着 SMB 的机器）
 
-共享里按**平台一个目录**放，每个目录里有一份 Pegasus 的
-`metadata.pegasus.txt`：
+只要求一件事：**开着 SMB（445 端口），开一个共享，把游戏目录放进共享根下。**
+NAS 上**不需要装任何服务**，本程序**只读不写**，不会往 NAS 上放任何东西。
+
+#### 目录怎么摆
+
+**规则只有一条：每个平台一个「顶层目录」，里面放一份 `metadata.pegasus.txt`。**
 
 ```
-Roms/                        ← SMB 共享名
-├── FC/
-│   ├── metadata.pegasus.txt ← 必须，游戏清单
-│   ├── media/               ← 封面等素材（安装时按 media/<游戏名>/ 自动导入）
+Roms/                            ← 这是 SMB 共享名，随便叫什么都行
+├── FC/                          ← 顶层目录 = 一个平台
+│   ├── metadata.pegasus.txt     ← 【必须】文件名必须一字不差，见下
+│   ├── media/                   ← 【可选】素材目录，见下
 │   │   └── 1943/
-│   │       ├── boxFront.jpg ← 封面（拿这个）
-│   │       ├── logo.png
-│   │       └── video.mp4    ← 不下发，直接串流播（见第九节）
-│   ├── 超级马里奥.nes
+│   │       ├── boxFront.jpg     ← 封面（安装时复制到掌机）
+│   │       ├── logo.png         ← 标题图
+│   │       └── video.mp4        ← 预览视频（不复制，直接串流播）
+│   ├── 超级马里奥.nes           ← ROM 文件，位置随意
+│   ├── 1943.zip
 │   └── ...
+├── SFC/                         ← 另一个平台
+│   └── metadata.pegasus.txt
 ├── PSP/
-│   ├── metadata.pegasus.txt
-│   └── ...
-├── SFC/
+│   └── metadata.pegasus.txt
 └── ...
 ```
 
-`metadata.pegasus.txt` 用 Pegasus 格式（`collection:` / `game:` / `file:` /
-`assets.box_front` / `description:`）。目录名用常见的短名即可
-（`FC` / `SFC` / `PSP` / `MD` / `PS1` / `SS` …），
-程序内置一张 **68 条**的映射表把目录名翻成 EmulationStation 的系统名，
-并在启动时与实机的 `es_systems.cfg` 交叉校验。
+**几个容易踩的点：**
 
-> 如果你用的是其它来源的 ROM 包，只要满足「一个平台一个目录 +
-> 目录里有 metadata.pegasus.txt」，就能被识别。
+| 要求 | 说明 |
+| --- | --- |
+| 平台目录必须在**共享根下** | 不能是 `Roms/roms/FC/` 这种嵌套。程序只扫共享根的**一层**子目录 |
+| 文件名必须**一字不差** | `metadata.pegasus.txt`（全小写、`.txt` 后缀）。写成 `metadata.txt` / `pegasus.txt` / `METADATA.PEGASUS.TXT` 都不会被识别 |
+| 目录名用什么随意 | 常见短名最好：`FC` `SFC` `GBA` `PSP` `MD` `PS1` `SS` `DC` `3DO`… **认不出来这个平台会被跳过**，见本节末尾 |
+| ROM 可以放在子目录里 | 如 `D no Shokutaku/xxx.chd`，`metadata` 里的 `file:` 写相对路径即可 |
+| 共享名无所谓 | 装的时候填你实际的共享名（默认 `Roms`） |
+
+> **只有一个平台目录行不行？** 行。放一个也能用，只是商店里只有一个系统可选。
+
+#### `metadata.pegasus.txt` 怎么写
+
+这是**唯一必须自己准备的文件** —— 它是游戏清单，程序靠它才知道有哪些游戏。
+格式是 [Pegasus _metadata](https://pegasus-assets.org/metadata)（标准 YAML，程序只读其中几个字段）。
+最小可用版本长这样：
+
+```yaml
+collection: FC                      # 文件头：平台名，随便写，不影响功能
+sort-by: 001
+
+game: 1943                         # 【必须】游戏标题，显示在商店里
+file: 1943.zip                     # 【必须】ROM 相对路径（单文件）
+description: 1943年，是 Capcom 的经典纵版射击游戏。
+developer: Capcom
+
+game: 超级马里奥兄弟3
+file: 超级马里奥兄弟3.zip
+```
+
+**字段说明：**
+
+| 字段 | 必须 | 说明 |
+| --- | :---: | --- |
+| `game:` | ✅ | 游戏标题。商店里显示的名字就是它 |
+| `file:` | ✅¹ | ROM 的相对路径。**单文件游戏用它** |
+| `files:` | ✅¹ | 多碟游戏用这个代替 `file:`，下面每行缩进写一个碟 |
+| `description:` | | 简介，显示在右栏。省略就没有简介 |
+| `assets.box_front:` | | 封面相对路径。**可以省略** —— 程序会自动按 `media/<ROM名>/` 推导 |
+| `developer:` `genre:` `players:` `release:` | | 补充信息，程序目前不显示，但留着不亏 |
+| `collection:` `sort-by:` `launch:` `extensions:` | | 文件头块，程序会跳过；保留是 Pegasus 的标准写法 |
+
+> ¹ 每个游戏必须有 `file:` 或 `files:` 其中之一，否则这个游戏会被跳过。
+
+**多碟游戏**用 `files:`（缩进表示继续行）：
+
+```yaml
+game: 宇宙冒险家
+files:
+  Daedalus Encounter/Daedalus Encounter (Disc 1).chd
+  Daedalus Encounter/Daedalus Encounter (Disc 2).chd
+  Daedalus Encounter/Daedalus Encounter (Disc 3).chd
+description: 1990 年的太空飞行模拟。
+```
+
+装这类游戏时会自动生成 `.m3u` 播放列表，ES 能正确读多碟。
+
+#### 素材目录（可选，但强烈建议）
+
+封面和预览视频都放在平台目录下的 `media/` 里，**子目录名 = ROM 文件名去掉扩展名**：
+
+```
+FC/1943.zip                ← ROM
+FC/media/1943/boxFront.jpg ← 封面
+FC/media/1943/video.mp4    ← 预览视频
+```
+
+这条对应关系让程序能**直接推导**素材路径，不需要遍历几万个子目录（实测遍历要 24.8 秒，推导是 0 秒）。
+
+- **素材目录名**：默认认 `media/`，也兼容 `img` / `images` / `image` / `covers` / `boxart`
+- **封面文件名**：认 `boxfront` / `box_front` / `box` / `cover` / `front` / `folder` 等，
+  扩展名认 `.png` `.jpg` `.jpeg` `.webp`，**全部大小写不敏感**
+  （实测同一目录里 `boxFront.jpg` 和 `boxfront.jpg` 并存，硬拼路径会静默读不到）
+- **兜底**：上表全都没有时，会取该目录下第一张「像封面」的图片
+- **没有素材不算错误**：游戏照样能列出、能安装，只是没封面没预览
+
+> 程序找素材时用的是 **ROM 真实所在的那个平台目录**，不是清单里写的那个。
+> 同一份清单被拆到两个目录时（`SS` / `SS plus`、`PS1` / `PS1 hack` 等都这样）也能找对。
+
+#### 目录名认不出来怎么办
+
+程序内置一张 **68 条**的映射表，把 NAS 目录名翻成 EmulationStation 的系统名：
+
+| NAS 目录 | ES 系统名 | | NAS 目录 | ES 系统名 |
+| --- | --- | --- | --- | --- |
+| `FC` | `nes` | | `PSP` | `ppsspp` |
+| `SFC` | `sfc` | | `MD` | `megadrive` |
+| `GBA` | `gba` | | `PS1` | `psx` |
+| `DC` | `dreamcast` | | `SS` | `saturn` |
+| `3DO` | `3do` | | | |
+
+**注意两边名字往往不一样** —— `FC` 对应的 ES 系统叫 `nes` 而不是 `fc`，
+`PSP` 叫 `ppsspp`，`DC` 叫 `dreamcast`。所以**别按 ES 的名字建 NAS 目录**，
+按常见短名建就行。
+
+⚠️ **目录名不在表里，这个平台就整个被跳过** —— 游戏不会被索引，商店里看不到。
+如果你换了新的 ROM 包、某个平台突然消失了，先跑校验（它会同时核对
+映射表、ES 配置和 NAS 实际目录）：
+
+```bash
+python3 -m romstore.cli --validate   # 校验映射表 / ES 配置 / NAS 目录
+python3 -m romstore.cli --systems    # 列出识别成功的平台及其游戏数
+python3 -m romstore.cli --list FC    # 看某个平台下的游戏
+```
+
+对策：把目录名改成表里已有的名字。表里没有的话，在
+`src/romstore/mapp.py` 的 `MAP` 里加一行：
+
+```python
+('你的目录名', 'es系统名', '/roms/es系统名', 'ok', '中文说明'),
+```
 
 ---
 
