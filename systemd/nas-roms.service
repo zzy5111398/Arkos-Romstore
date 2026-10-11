@@ -1,0 +1,14 @@
+[Unit]
+Description=Mount NAS Roms share at /mnt/Roms
+After=network.target NetworkManager-wait-online.service
+Wants=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/nas-roms-mount.sh
+ExecStop=/bin/umount /mnt/Roms
+TimeoutStartSec=200
+
+[Install]
+WantedBy=multi-user.target
