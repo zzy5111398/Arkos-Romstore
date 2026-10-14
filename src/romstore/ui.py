@@ -1,16 +1,40 @@
 # -*- coding: utf-8 -*-
 """SDL2 中文界面
 
-屏幕 640x480（R36S）。**游戏页是双栏**（0.5.0 起）：
-  ┌ 顶栏 52px  系统名 + 游戏数
+屏幕 640x480（R36S / X35S）。**游戏页是双栏**（0.5.0 起）：
+  ┌ 顶栏 44px  系统名 + 「第几张/共几张 款」
   ├ 卡片网格区      │ 右栏详情区（常驻 DETAIL_W=232）
-  │ 封面卡片 5x3   │ 游戏标题（两行）
+  │ 封面卡片 4x4   │ 游戏标题（两行）
   │ 选中项高亮边框   │ 已安装 / 多碟 标签
-  │ 已装的有绿点     │ 视频预览区（16:9 画面 + 播放按钮）
+  │ 已装的有绿点     │ 视频预览区（16:9 画面）
   │                │ 简介正文（右摇杆上下滚动）
-  └ 底栏 44px  按键提示
+  └ 底栏 38px  按键提示
 
 系统页仍是单列列表（只几十行，不需要网格）。
+
+**卡片上不写标题**（0.6.0，用户要求）：原来标题占卡片底部两行，紧贴在封面正下方、
+底色又与封面边框同色，看着像一条压在封面底部的黑带。去掉后封面撑满整格
+（本 NAS 的封面原图就是正方形，1:1 铺满不留白），游戏名由右栏详情栏负责。
+腾出来的高度没有浪费 —— 卡片从 5x4 的 71px 变成 **4x4 的 91px**，
+同时顶栏/底栏各收窄 8/6px 把可用高度从 378 抬到 392。
+唯一的例外是「确实没有封面」的游戏：那时仍在格子里居中写名字兜底。
+
+**选中态只用 2px 亮边框表示，不铺色块**（0.5.0 二轮）：早先在选中卡片下面
+铺一片蓝底，等于拿蓝方片盖住封面 —— 封面恰恰是浏览时最有用的识别信息。
+
+**正文用 13px 小字**（f_tiny）：16px 在 640x480 上偏大，右栏简介一屏只剩 8 行，
+能看到的字太少。13px 是文泉驿仍能认读汉字的下限。
+
+封面与简介**不在主线程加载**（单张封面从 NAS 读 + 解码实测 0.1~0.3 秒，
+一屏 16 张同步加载会冻住界面）。见 cover.py。
+
+预览视频有两条路，见 vplayer.py：
+  * 右栏常驻预览（**在界面进程里**出画面）——
+    ArkOS 走 ffmpeg 管道；AURKNIX/ROCKNIX 没有 ffmpeg 命令行，改走
+    mpv 的 --vo=image 帧服务，并带 rkvdec 硬解。
+  * 按 X 全屏预览 —— 退出本进程，由外层 RomStore.sh 用 mpv 播，
+    回来后用 `--resume <id>` 把网格光标恢复到那张卡片（见 request_play/goto_game）。
+    请求通过退出码 42 + 请求文件传递。
 
 按键（掌机没有键盘，全部动作都有手柄绑定）：
   游戏页  十字键/左摇杆  网格内二维移动（到边停住，**不绕回**）
@@ -22,20 +46,6 @@
 
 **A 和 X 在所有层级含义一致**（0.4.2 时 X 在列表页是安装、详情页才是播放，
 两个层级含义不同很容易按错；0.5.0 没有详情页了，统一掉）。
-
-**选中态只用 2px 亮边框表示，不铺色块**（0.5.0 二轮）：早先在选中卡片下面
-铺一片蓝底，等于拿蓝方片盖住封面 —— 封面恰恰是浏览时最有用的识别信息。
-
-**正文用 13px 小字**（f_tiny）：16px 在 640x480 上偏大，卡片标题两行就占 32px、
-右栏简介一屏只剩 8 行，能看到的字太少。13px 是文泉驿仍能认读汉字的下限。
-
-封面与简介**不在主线程加载**（单张封面从 NAS 读 + 解码实测 0.1~0.3 秒，
-一屏 15 张同步加载会冻住界面）。见 cover.py。
-
-预览视频怎么播（按 X）：掌机没有 X11/Wayland，本进程又占着 KMS 显示，
-所以走的是「本进程退出 -> 外层 RomStore.sh 用 mpv DRM 直出播放 -> 重新拉起本进程
-并把网格光标恢复到那张卡片」这条路。请求通过退出码 42 + 请求文件传递，
-见 request_play() 与 goto_game()。
 
 软键盘（screen='kb'，掌机没键盘，所有文本都靠它输入）：
   十字键/左摇杆  选字符       A            输入该字符
@@ -59,14 +69,17 @@ from . import source as src
 from . import vplayer as vplayer_mod
 
 W, H = 640, 480
-HEADER_H = 52
-FOOTER_H = 44
+# 顶栏 / 底栏高度。0.6.0 各收窄 8px / 6px：卡片去掉标题后要的是**更大的封面**，
+# 而可用高度是硬约束（4 行卡片时卡宽 = (可用高 - 3*间距) / 4）。
+#   378 -> 392  让 4 列 4 行能摆下 91px 的卡片（原来只够 88px）
+HEADER_H = 44
+FOOTER_H = 38
 ROW_H = 30
 
-# ---- 卡片网格 + 右栏详情（0.5.0 布局）----------------------------------
+# ---- 卡片网格 + 右栏详情（0.5.0 布局，0.6.0 去掉卡片标题）------------------
 #  顶栏
 # ┌──────────────────────────────┬─────────────┐
-# │ 卡片 x N 列（封面 + 标题）      │ [标签] 游戏标题│
+# │ 卡片网格（**只有封面**）        │ [标签] 游戏标题│
 # │                              │ 视频预览区   │
 # │                              │ 简介（可滚动）│
 # └──────────────────────────────┴─────────────┘
@@ -74,16 +87,24 @@ ROW_H = 30
 DETAIL_W = 232      # 右栏宽度
 PAD = 10            # 网格左边距
 CARD_GAP = 8        # 卡片间距
-# 卡片底部标题**两行**的高度。字从 16px 降到 13px 后，行高从 16 降到 15，
-# 两行 30px 就够（比原来 32 少 2px，15 张/屏的布局仍成立）。
-CARD_TEXT_H = 30
-# 卡片封面区取 **1:1**，不是游戏封面常见的 3:4 竖版。这是算出来的：
-# 640x480 扣掉顶栏/底栏只剩 378px 高，5 列卡宽 71px。
-#   3:4 竖版封面 + 两行标题 = 卡高 126 -> 只放得下 2 行 = 每屏 10 款
-#   1:1      封面 + 两行标题 = 卡高 101 -> 放得下   3 行 = 每屏 15 款
-# 竖版封面放进 1:1 的框会被 letterbox 留白，但换来标题可读 + 每屏多 5 款，
-# 这个取舍明显更值（标题被截成「恶魔…」是硬伤，留白只是不好看）。
+# 卡片上**不写标题**（用户明确要求，0.6.0）。原来标题占卡片底部两行，
+# 但它紧贴在封面正下方、底色又与封面边框同色，看着像一条压在封面底部的
+# 黑带。去掉之后封面撑满整格，游戏名由右栏详情栏负责。
+# 例外的只有「确实没有封面」的那些 —— 那时仍在格子里写名字兜底，
+# 否则一整格黑方块认不出是哪款（见 _draw_card）。
+CARD_TEXT_H = 0
+# 卡片封面区取 **1:1**（去掉标题后卡片就是正方形）。
+# 本 NAS 的封面原图实测就是正方形（480x480 / 600x600），1:1 正好铺满，
+# 既不留白也不变形。
 CARD_ASPECT = 1
+# 网格"要多大"，见 _grid_metrics()：
+#   卡片尺寸与"每屏几张"是一对矛盾（卡越大每屏越少），
+#   这里先钉死每屏**至少**这么多张，然后在满足它的方案里挑卡片最大的。
+#   实测 640x480 下这个值给出 **4 列 x 4 行 = 16 张，卡宽 91px**。
+#   想再大就把它调小：调成 9 会得到 3x3 / 124px，调成 12 得到 4x3 / 91px。
+GRID_TARGET_CARDS = 16
+# 卡宽下限。低于它就别再往下试更小的卡片了（会排得像马赛克）
+CARD_MIN = 48
 # 右栏视频预览区尺寸。视频按 16:9 铺满右栏。
 # 高度 123 是量出来的：右栏共 376px，标题(最多两行 48)+视频(123)+分隔(10)
 # 之后简介还剩约 175px = 11 行，够看也够滚。再高就把简介挤没了。
@@ -93,12 +114,15 @@ PREVIEW_W = 218
 PREVIEW_H = 123
 
 # **封面缩略图的规范化尺寸**。后台加载器按这一个尺寸解码网格封面，
-# 一款游戏只解码一次，右栏预览区在抽帧就绪前也复用它做占位。
-# 取 5 列布局下卡片的内区尺寸，见 _grid_metrics()。
-# ⚠️ 视频帧是**另一个尺寸**（PREVIEW_W x PREVIEW_H），走 ffmpeg 抽帧时
-# 单独解码 —— 两者共用一个尺寸会把画面拉变形。
-CARD_IMG_W = 67
-CARD_IMG_H = 67
+# 一款游戏只解码一次，右栏预览区在视频就绪前也复用它做占位。
+# 取值 = 4 列布局下卡片的内区尺寸（卡宽 91 - 左右各 2px 边框 = 87），见 _grid_metrics()。
+# ⚠️ 换布局（改 GRID_TARGET_CARDS / DETAIL_W）要跟着改这两个数，
+# 否则封面会被放大 -> 糊。缩略图是**正方形**，所以宽高相同。
+# 内存：87*87*4 = 30KB/张，缓存上限 8 张 -> 240KB，可以忽略。
+# ⚠️ 视频帧是**另一个尺寸**（PREVIEW_W x PREVIEW_H）——两者共用一个尺寸
+# 会把画面拉变形。
+CARD_IMG_W = 87
+CARD_IMG_H = 87
 
 # ---- 「播放预览视频」的进程间协议 -------------------------------------------
 # 本进程占着 KMS/DRM 显示，没法在自己进程里解视频（掌机没有 python 解码器绑定），
@@ -264,6 +288,15 @@ class App(object):
         self.status = ''
         self.scanning = False
         self.progress = None
+        # ---- 传输速度计（进度页的「速度 xx MB/s」用）--------------------------
+        # 样本来自 install.py 每写满 512KB 回调一次，**由 worker 线程写、
+        # 主线程读**，所以必须加锁：主线程正在遍历样本列表时 worker 恰好
+        # pop 掉一个，就是 IndexError 蹦在渲染里（画面直接崩）。
+        self._sp_lock = threading.Lock()
+        self._sp = []            # [(时刻, 已传字节)]，滑动窗口样本
+        self._sp_hist = []       # 最近若干次瞬时速度，画成下面的小柱状图
+        self._sp_at = 0.0        # 最后一次采样的时刻
+        self.t_start = 0.0       # 本次任务开始时刻（算已用时间）
         self.worker = None
         self.worker_result = None
         self.running = True
@@ -281,10 +314,20 @@ class App(object):
         # 主线程只 blit 和查表（详见 cover.py 顶部的线程约束说明）
         self.covers = cover_mod.CoverLoader(self.b, CARD_IMG_W, CARD_IMG_H)
         self.descs = cover_mod.DescLoader()
-        # 右栏视频**播放器**（vplayer）：一个常驻 ffmpeg 管道 + 一个 worker，
-        # 随「当前选中项」走。跟封面加载器完全独立 ——
-        # 封面是「加载一次的资源」，视频是「一直在放的内容」。
-        self.vplayer = vplayer_mod.VideoPlayer(self.b, PREVIEW_W, PREVIEW_H)
+        # 右栏视频**播放器**（vplayer）：随「当前选中项」走，跟封面加载器
+        # 完全独立 —— 封面是「加载一次的资源」，视频是「一直在放的内容」。
+        #
+        # ⚠️ 必须用工厂挑后端，不能直接 new VideoPlayer（0.6.0）：
+        #   ArkOS   有 ffmpeg 命令行 -> ffmpeg 管道（老实现）
+        #   ROCKNIX **没有 ffmpeg**，只有 mpv -> mpv 帧服务（带硬解）
+        #   两个都没有                 -> NullPlayer（什么都不做）
+        # 早先写死 VideoPlayer，在 ROCKNIX 上会退化成"每 50ms 失败重试一次
+        # 的忙等"、而右栏还一直显示「正在播放预览…」在骗人。
+        self.vplayer = vplayer_mod.create(self.b, PREVIEW_W, PREVIEW_H)
+        # 「X 全屏预览」是交给外层 RomStore.sh 用 mpv 播的，所以这条路能不能走
+        # 取决于**本机有没有 mpv**，跟上面那个内嵌后端是两码事
+        # （ROCKNIX 上：内嵌走 mpv 能用，全屏也走 mpv 能用，一致）。
+        self.has_mpv = bool(vplayer_mod.tool('mpv'))
         # ROM 文件大小：后台 scandir 整个系统目录一次建表（实测 0.1 秒），
         # 之后每帧查表是 O(1)。逐个 getsize 是 10.7ms/款，绝不能放主线程。
         self.sizes = cover_mod.SizeLoader()
@@ -376,9 +419,15 @@ class App(object):
         if self.worker and self.worker.is_alive():
             return
         self.progress = {'phase': '准备', 'done': 0, 'total': 1, 'msg': game['title']}
+        self.speed_reset()
 
         def prog(phase, done, total, msg):
             self.progress = {'phase': phase, 'done': done, 'total': total, 'msg': msg}
+            # 只有 'copy' 阶段真的在搬字节，也只有它的 done 是"字节数"。
+            # 'check'/'m3u'/'art'/'gamelist' 的 done 是 0 或者等于 total，
+            # 拿它们算速度会得出 0 或天文数字。
+            if phase == 'copy' and total > 1:
+                self.speed_sample(done)
 
         def work():
             try:
@@ -576,10 +625,23 @@ class App(object):
 
     # ------------------------------------------------------------ 游戏屏（卡片网格 + 右栏详情）
     def _grid_metrics(self):
-        """算网格的列数、可见行数，以及**右栏的起始 x**
+        """算网格的列数、可见行数、卡宽，以及**右栏的起始 x**
 
         640x480 减去顶栏/底栏，左栏留给网格，右栏 DETAIL_W 给详情。
-        卡片按 3:4 竖版封面比例（游戏封面几乎都是这个比例）。
+
+        ## 为什么要"搜"而不是直接定 5 列（0.6.0）
+
+        卡片尺寸和"每屏几张"是一对矛盾：4 行卡片时卡宽被**高度**卡住
+        （= (可用高 - 3*间距) / 4），而列数少了又会被**宽度**卡住。
+        老写法先钉死 5 列再算卡宽，于是去掉标题腾出来的高度全白费了 ——
+        卡宽被宽度锁死在 71px，多出来的行高没人用。
+
+        现在反过来：枚举列数(2~6) x 行数，每个组合取
+        `min(宽度允许的卡宽, 高度允许的卡宽)`，然后在**每屏张数 >=
+        GRID_TARGET_CARDS** 的组合里挑卡宽最大的那个。
+
+        实测 640x480：4 列 x 4 行 / 卡宽 91px / 每屏 16 张（可用高 392 正好
+        用完）。5 列时卡宽只有 71px，3 列时虽然能到 124px 但每屏只剩 9 张。
 
         **右栏 x 必须在这里一并算出来**：早先在 render_games 里另算一遍，
         两处的 PAD 数法不一致，网格右边正好压掉右栏分隔线 10 px。
@@ -587,25 +649,69 @@ class App(object):
         """
         left_w = self.ww - DETAIL_W - PAD * 2
         avail_h = self.wh - HEADER_H - FOOTER_H - 6
-        # 先按 5 列试，放得下就用 5 列（每屏 15 张，比 4 列翻页少得多）
-        for cols in (5, 4, 3):
-            cw = (left_w - CARD_GAP * (cols - 1)) // cols
-            ch = cw + CARD_TEXT_H          # 封面 1:1，见 CARD_ASPECT
-            rows = (avail_h - 4) // (ch + CARD_GAP)
-            if rows >= 2:
-                detail_x = PAD * 2 + cols * cw + (cols - 1) * CARD_GAP
-                return cols, max(1, rows), cw, ch, detail_x
-        cw = max(1, left_w // 3)
-        detail_x = PAD * 2 + cw
-        return 1, 1, cw, cw * 4 // 3 + CARD_TEXT_H, detail_x
+        best = None                      # (卡宽, 张数) -> 越大越好
+        pick = None
+        for cols in range(2, 7):
+            cw_w = (left_w - CARD_GAP * (cols - 1)) // cols
+            if cw_w < CARD_MIN:
+                continue
+            max_rows = (avail_h + CARD_GAP) // (cw_w + CARD_GAP)
+            for rows in range(max_rows, 0, -1):
+                cw = min(cw_w, (avail_h - CARD_GAP * (rows - 1)) // rows)
+                if cw < CARD_MIN:
+                    continue
+                if cols * rows < GRID_TARGET_CARDS:
+                    continue
+                key = (cw, cols * rows)   # 先比卡多大，一样大再比谁更紧凑
+                if best is None or key > best:
+                    best, pick = key, (cols, rows, cw)
+        if pick is None:
+            # 连目标张数都凑不齐（超小屏 / 右栏被调得很宽）：退到
+            # "能塞几列塞几列、卡片尽量大"，保证界面不会画不出来
+            cols = max(1, (left_w + CARD_GAP) // (CARD_MIN + CARD_GAP))
+            cw = max(1, (left_w - CARD_GAP * (cols - 1)) // cols)
+            rows = max(1, (avail_h + CARD_GAP) // (cw + CARD_GAP))
+            pick = (cols, rows, cw)
+        cols, rows, cw = pick
+        ch = cw + CARD_TEXT_H
+        detail_x = PAD * 2 + cols * cw + (cols - 1) * CARD_GAP
+        return cols, max(1, rows), cw, ch, detail_x
+
+    def _grid_viewport(self, cols, rows):
+        """算出网格首行的起始下标（同时写回 self.game_top），并返回它
+
+        视口是**粘性状态**：它只在选中项要跑出可见区时才动，一次动一行。
+        绝不能每帧从选中项反推（`top = sel - per_page//2` 那种）——
+        反推出来的必然是"居中跟随"，光标会被钉在中间一行不动，
+        而任何按键都会带着整屏一起滚。0.6.0 之前就是这个毛病，
+        用户的原话是「按右键只会向下换行」「网格会出现横向滚动」。
+
+        抽成独立方法是为了能离线测（见 tests/test_nav.py）——
+        它只碰 game_sel / game_top / games，不需要 SDL 和字体。
+        """
+        n = len(self.games)
+        top_row = self.game_top // cols
+        total_rows = (n + cols - 1) // cols
+        max_top_row = max(0, total_rows - rows)
+        top_row = max(0, min(top_row, max_top_row))
+        sel_row = self.game_sel // cols
+        if sel_row < top_row:                       # 往上跑出去了
+            top_row = sel_row
+        elif sel_row > top_row + rows - 1:          # 往下跑出去了
+            top_row = sel_row - rows + 1
+        self.game_top = top_row * cols
+        return self.game_top
 
     def render_games(self):
         s = self.current_system()
         if not s:
             self.screen = 'systems'
             return self.render_systems()
+        # 位置指示并进顶栏。0.6.0 之前它在网格右下角（wh-FOOTER_H-22），
+        # 那时网格只有 3 行、够不着那儿；现在网格铺满可用高度，
+        # 那个位置**正好压在最后一行卡片上**，所以挪到顶栏副标题。
         self.header(s['nas_dir'] + ('  ' + s['note'] if s['note'] else ''),
-                    '%d 款' % len(self.games))
+                    '%d/%d 款' % (self.game_sel + 1, len(self.games)))
         if not self.games:
             self.txt('该系统没有可安装的游戏。', 20, 120, WARN, self.f_row)
             self.footer([('B', '返回')])
@@ -613,11 +719,10 @@ class App(object):
 
         cols, rows, cw, ch, detail_x = self._grid_metrics()
         per_page = cols * rows
-        # 让选中项尽量留在中间一行，翻页时视线不用大幅跑动
-        top = self.game_sel - per_page // 2
-        max_top = max(0, len(self.games) - per_page)
-        top = max(0, min(top, max_top))
-        self.game_top = top
+        # 视口：只纵向、只在光标要跑出可见区时才滚一行。
+        # 4 行可见时，光标在第 1~3 行完全不滚，从第 3 行再往下才滚
+        # —— 也就是用户要的「第四行开始滚动」。详见 _grid_viewport。
+        top = self._grid_viewport(cols, rows)
 
         # 通知后台把可见卡片（外加下一屏预取）去加载 —— 每帧调用，必须便宜
         self.covers.pump(self.games, top, per_page, self.game_sel)
@@ -638,14 +743,13 @@ class App(object):
         self._draw_detail(detail_x, HEADER_H + 4, DETAIL_W,
                           self.wh - HEADER_H - FOOTER_H - 8)
 
-        self.txt_r('%d/%d' % (self.game_sel + 1, len(self.games)),
-                   self.ww - DETAIL_W - 12, self.wh - FOOTER_H - 22,
-                   TEXT_MUTE, self.f_small)
         # 视频是否存在也是后台查的。还没查完时**不能**直接说「无预览」——
         # 那是在替后台下结论。按住不动等一秒就会变成正确的字。
+        # 另外：没装 mpv 的机器上「全屏预览」根本走不通，那就老实说没有，
+        # 别让用户按下去等一个不会出现的黑屏。
         g = self.games[self.game_sel]
         if self.video_of(g):
-            play = '全屏预览'
+            play = '全屏预览' if self.has_mpv else '无预览'
         elif self.covers.ready(g['id']):
             play = '无预览'
         else:
@@ -673,14 +777,22 @@ class App(object):
         return lines
 
     def _draw_card(self, g, x, y, cw, ch, selected):
-        """一张卡片：封面 + 标题（+ 已装/多碟角标）
+        """一张卡片：**只有封面**（+ 已装 / 多碟 / 无封面时的文字兜底）
 
-        选中态 = **只画框**，不铺蓝底。早先用 0xFF2C3A55 整块铺底，
-        等于拿一张蓝方片盖住封面 —— 恰好把「用封面认游戏」这件事废掉了，
-        而封面正是这个商店里最有用的识别信息。现在底板对选中与否完全一致，
-        只靠 2px 亮边框区分。
+        0.6.0 按用户反馈改了两处：
+          * 选中态 = **只画框**，不铺蓝底。早先用 0xFF2C3A55 整块铺底，
+            等于拿一张蓝方片盖住封面 —— 恰好把「用封面认游戏」这件事废掉了，
+            而封面正是这个商店里最有用的识别信息。
+          * 卡片上**不再写标题**。标题原来占卡片底部两行，紧贴在封面正下方、
+            底色又与封面边框同色，看着像一条压在封面底部的黑带。
+            去掉后封面撑满整格（本 NAS 的封面是正方形，1:1 正好铺满），
+            游戏名改由右栏详情栏显示。
+
+        唯一例外：**确实没有封面**的游戏仍在格子里居中写名字（最多 3 行），
+        否则一整格黑方块认不出是哪一款。
         """
-        img_h = int(cw / float(CARD_ASPECT)) + 2
+        # 正方形封面区，四周各留 2px 边框 —— 卡片就是封面本身
+        img_h = int(cw / float(CARD_ASPECT))
         # 卡片底板：选中与否**完全一样**，都是同一层浅底
         self.canvas.rect(x, y, cw, ch, 0xFF262626)
         # 封面区
@@ -690,30 +802,18 @@ class App(object):
             sw, sh = surf.contents.w, surf.contents.h
             self.canvas.blit(surf, x + 2 + ((cw - 4) - sw) // 2,
                              y + 2 + ((img_h - 4) - sh) // 2)
+        elif self.covers.ready(g['id']):
+            # 查完了确实没有封面 -> 用名字兜底
+            self._draw_card_name(g, x, y, cw, img_h, selected)
         else:
-            # 还在加载：给个「载入中」而不是留白，避免误以为没封面
-            if not self.covers.ready(g['id']):
-                self.txt_r('…', x + cw - 8, y + img_h // 2 - 8, TEXT_MUTE,
-                           self.f_small)
+            # 还在加载：给个「…」而不是留白，避免误以为没封面
+            self.txt_r('…', x + cw - 8, y + img_h // 2 - 8, TEXT_MUTE,
+                       self.f_small)
 
         # 已安装角标：右上角一个小绿点，比写「已装」两个字省地方
         if self.is_installed(g):
             self.canvas.rect(x + cw - 12, y + 6, 6, 6, argb(GREEN))
 
-        # 标题**两行**。单行在 71px 宽的卡片里会被截成「恶魔…」，
-        # 完全看不出是哪款游戏 —— 对一个浏览 751 款游戏的商店来说这是硬伤。
-        # 封面按 1:1 给，下面两行 13px 文字（0.5.0 二轮由 16px 调小）。
-        #
-        # **必须缓存**：标题是固定文本，卡宽也固定，排一次就够。
-        # 早先每帧对 15 张卡片各跑一次 wrap，而 wrap 要逐字量像素宽度
-        # （真机 cProfile：10 帧里 Fonts.width() 被调 1720 次，
-        #   是仅次于 blit 的第二大热点）。改成按 (游戏id, 卡宽) 缓存后归零。
-        key = (g['id'], cw, 'card')
-        lines = self._cached_lines(key, g['title'], cw - 8, 2)
-        ty = y + img_h + 1
-        for ln in lines:
-            self.txt(ln, x + 4, ty, WHITE if selected else TEXT_DIM, self.f_tiny)
-            ty += 15
         if g['is_multi']:
             # 「多碟」角标放卡片右上角，和「已装」绿点分列两侧
             self.txt_r('碟', x + cw - 5, y + 4, WARN, self.f_small)
@@ -725,6 +825,23 @@ class App(object):
             self.canvas.rect(x - 2, y + ch, cw + 4, 2, e)         # 下
             self.canvas.rect(x - 2, y - 2, 2, ch + 4, e)          # 左
             self.canvas.rect(x + cw, y - 2, 2, ch + 4, e)         # 右
+
+    def _draw_card_name(self, g, x, y, cw, img_h, selected):
+        """没有封面时的兜底：把游戏名居中写在格子里的 13px 小字（最多 3 行）
+
+        **必须缓存**：wrap 要逐字量像素宽度，而真机 cProfile 早就证明
+        Fonts.width() 是仅次于 blit 的热点（10 帧 1720 次）。按
+        (游戏id, 卡宽) 缓存一次就够 —— 标题是固定文本，卡宽也固定。
+        """
+        lines = self._cached_lines((g['id'], cw, 'cardnb'), g['title'],
+                                   cw - 10, 3)
+        lh = 15
+        ty = y + 2 + max(0, ((img_h - 4) - len(lines) * lh) // 2)
+        for ln in lines:
+            tw = self.f_tiny.width(ln)
+            self.txt(ln, x + max(2, (cw - tw) // 2), ty,
+                     WHITE if selected else TEXT_DIM, self.f_tiny)
+            ty += lh
 
     def _draw_detail(self, x, y, w, h):
         """右栏：状态标签 + 标题 + **视频预览区** + 简介（可滚动）
@@ -854,7 +971,13 @@ class App(object):
         if surf is not None:
             sw, sh = surf.contents.w, surf.contents.h
             self.canvas.blit(surf, x + (w - sw) // 2, y + (ph - sh) // 2)
-        if has_video:
+        if has_video and not self.vplayer.available:
+            # 本平台**没法在界面里播**（比如 ROCKNIX 上没有 ffmpeg 命令行）。
+            # 这里绝不能压半透明条 + 写「正在播放预览…」—— 那是假话，
+            # 用户会一直等一个永远不来的画面。只提示还有全屏预览这条路。
+            self.txt('按 X 全屏预览', x + w // 2 - 46, y + ph // 2 - 8,
+                     TEXT_DIM, self.f_small)
+        elif has_video:
             self.canvas.rect(x, y, w, ph, 0x99000000)   # 半透明盖住封面
             self.txt('正在播放预览…', x + w // 2 - 52, y + ph // 2 - 8,
                      TEXT_DIM, self.f_small)
@@ -928,6 +1051,12 @@ class App(object):
             self.msg = {'text': '这款游戏没有预览视频。\n（按 A 仍可正常安装）',
                         'color': WARN}
             return
+        if not self.has_mpv:
+            # 本机没装 mpv。RomStore.sh 那一段是用 mpv 播的，硬按下去只会
+            # 让界面退出又立刻回来（还白闪一下），不如在这里就说清楚。
+            self.msg = {'text': '本机没有 mpv，无法全屏预览。\n（按 A 仍可正常安装）',
+                        'color': WARN}
+            return
         try:
             with open(PLAY_REQ, 'w') as f:
                 f.write(v + '\n' + str(g['id']) + '\n')
@@ -938,13 +1067,179 @@ class App(object):
         self.running = False
 
     # ------------------------------------------------------------ 进度屏
+    # ------------------------------------------------------------ 速度计
+    #
+    # 0.6.0 新增：进度页显示**复制速度**。
+    #
+    # 为什么要在界面上单独立一个速度计：ROM 都是几十 MB 到几 GB，从 NAS
+    # 经 SMB（ArkOS）或 rclone FUSE（AURKNIX）读、再写到 SD 卡，快的时候
+    # 十几 MB/s、慢的时候几百 KB/s。只有一个百分比进度条，用户根本分不清
+    # 「还要等 10 秒」还是「已经卡死了」—— 速度一显示就明白了。
+    #
+    # 采样放在 UI 侧而不是 install.py：**不改 install() 的回调签名**
+    # （cli.py 也用它），而且任何阶段的字节流都自动被覆盖。
+    _SP_WINDOW = 3.0      # 滑动窗口长度（秒）：短了数字乱跳，长了反应迟钝
+    _SP_STALL = 2.0       # 超过这么久没有新样本就不显示数字，见 copy_speed
+    _SP_HIST = 60         # 柱状图保留多少格
+    _SP_MAX = 400         # 样本列表的硬上限（见 speed_sample 里的说明）
+
+    def speed_reset(self):
+        """开新任务时清零（换一个游戏/重新扫描，不能留着上一款的速度）"""
+        with self._sp_lock:
+            self._sp = []
+            self._sp_hist = []
+            self._sp_at = 0.0
+        self.t_start = time.time()
+
+    def speed_sample(self, done):
+        """记一个样本。**worker 线程调用**，所以要加锁（见 __init__ 的说明）"""
+        now = time.time()
+        with self._sp_lock:
+            self._sp.append((now, done))
+            self._sp_at = now
+            # 只留窗口内的样本；至少留 2 个，否则刚从窗口滑出去就没了
+            while len(self._sp) > 2 and now - self._sp[0][0] > self._SP_WINDOW:
+                self._sp.pop(0)
+            # 兜底硬上限。窗口裁剪是**靠"头部样本够老"**来推进的：万一
+            # 时间戳几乎不前进（极快的本地复制、NTP 把表拨回去、或者调用方
+            # 用假时间喂样本），头部永远不"够老"，列表就会一路涨下去。
+            # 真机上速度是 2~35 MB/s、512KB 一个样本，3 秒窗口本来就只有
+            # 几十个样本，这条上限正常永远碰不到 —— 它只是保证"有界"这个
+            # 性质不被时间源搞掉。这个是 tests/test_speed.py 第 7 节逼出来的。
+            if len(self._sp) > self._SP_MAX:
+                del self._sp[:-self._SP_MAX]
+            # 顺带记一格历史给柱状图 —— 跟着样本走而不是跟渲染走：
+            # 渲染是 30fps，跟它走的话一秒钟会塞 30 格，图会糊成一片。
+            if len(self._sp) >= 2:
+                span = self._sp[-1][0] - self._sp[0][0]
+                if span > 0.001:
+                    inst_ = (self._sp[-1][1] - self._sp[0][1]) / span
+                    self._sp_hist.append(inst_)
+                    if len(self._sp_hist) > self._SP_HIST:
+                        del self._sp_hist[:-self._SP_HIST]
+
+    def copy_speed(self):
+        """当前速度（字节/秒）。算不出、或已经停顿，返回 0.0
+
+        ## 分母用「现在」而不是「最后一个样本的时刻」
+
+        这样「卡住不动」会自然衰减到 0：没有新样本 → 分子不变，而分母
+        `now - t0` 一直在涨，速度被摊薄。反过来若在采样时就把速度算好存
+        起来，界面会一直挂着一个好看的数字骗人 —— 正是要避免的那种「假装
+        在跑」的显示。
+
+        但也不能一停就报 0：慢速传输时两个样本本来就可能隔一两秒
+        （512KB 的粒度，200KB/s 就是 2.5 秒一个样本）。所以只有超过
+        `_SP_STALL` 秒确实没有任何样本，才认定为停顿。
+        """
+        now = time.time()
+        with self._sp_lock:
+            first = self._sp[0] if self._sp else None
+            last = self._sp[-1] if self._sp else None
+            at = self._sp_at
+        if first is None or last is None or last is first:
+            return 0.0
+        if now - at > self._SP_STALL:
+            return 0.0
+        span = now - first[0]
+        got = last[1] - first[1]
+        if span <= 0.05 or got <= 0:
+            return 0.0
+        return got / span
+
+    def speed_history(self):
+        with self._sp_lock:
+            return list(self._sp_hist)
+
+    def speed_elapsed(self):
+        """本次传输已用了几秒
+
+        **以第一个样本为准**，而不是 `t_start`：真机上踩过 —— `t_start`
+        只在 `start_install` 里被 `speed_reset()` 赋值，任何绕过它构造
+        进度状态的路径（无头脚本、以后新增的入口）都会拿到 0，而
+        `time.time() - 0` 正好是个约 178 万的天文数字，界面会显示
+        「已用 497728 小时 25 分」。第一个样本的时刻才是"传输开始"的
+        可靠定义，它一定存在（有速度可显示就意味着有样本）。
+        """
+        with self._sp_lock:
+            first = self._sp[0][0] if self._sp else 0.0
+        t0 = first or self.t_start
+        if not t0:
+            return 0.0
+        return max(0.0, time.time() - t0)
+
+    @staticmethod
+    def human_speed(n):
+        """速度用「/s」后缀，并且 KB/s 不保留小数、MB/s 保留两位
+
+        和 inst.human 的档位规则一致（B/KB 取整，MB 以上两位小数），
+        免得出现「1023 KB/s」这种该进位却没进位的读法。
+        """
+        if n <= 0:
+            return '0 KB/s'
+        return inst.human(n) + '/s'
+
+    @staticmethod
+    def human_time(sec):
+        """秒 -> 12 秒 / 3 分 20 秒 / 1 小时 5 分（给"已用/剩余"用）
+
+        超过 100 小时就报 `--`：那不是"还剩很久"，那说明输入本身是坏的
+        （速度几乎是 0、或者时间戳没被初始化）。宁可不显示，也不显示一个
+        没人信的怪数字。
+        """
+        if sec is None or sec <= 0:
+            return '--'
+        sec = int(round(sec))
+        if sec >= 100 * 3600:
+            return '--'
+        if sec < 60:
+            return '%d 秒' % sec
+        if sec < 3600:
+            return '%d 分 %02d 秒' % (sec // 60, sec % 60)
+        return '%d 小时 %02d 分' % (sec // 3600, (sec % 3600) // 60)
+
+    def _draw_speed_hist(self, x, y, w, h):
+        """速度柱状图：看得出「在动」和「忽快忽慢」
+
+        数据是最近 60 个瞬时速度。**纵轴按窗口峰值归一化**，不按固定刻度
+        —— 从 NAS 拉的绝对速度换个网况能差一个数量级，固定刻度要么全顶格
+        要么全都看不见。归一化时留 15% 余量：实测 SMB 上速度很稳，不留余量
+        的话每根柱子都顶到天花板，整条图变成一块实心砖，看不出"稳"还是
+        "满"。
+
+        横向**从左边开始长**（老→新，最新的贴着右边缘）：满 60 格前左边是
+        实的、右边留白，一眼就知道"才刚开始"。反过来先钉死右对齐会让左半
+        边先空一大块，看着像画坏了。
+        """
+        hist = self.speed_history()
+        if not hist:
+            return
+        self.canvas.rect(x, y, w, h, 0xFF262626)
+        peak = max(hist) * 1.15
+        if peak <= 0:
+            return
+        bw = max(1, w // self._SP_HIST)          # 格宽固定，格子数才是变量
+        gap = 2 if bw >= 4 else 0                # 留缝才看得出是一根根柱子
+        n = len(hist)
+        for i, v in enumerate(hist):
+            bx = x + i * bw
+            if bx >= x + w:
+                break
+            bh = int((h - 2) * min(1.0, v / peak))
+            if bh < 1:
+                bh = 1
+            # 最后几格是"现在"，画亮一点；前面的是历史，压暗
+            col = 0xFF5C8FD6 if i >= n - 6 else 0xFF3F6294
+            self.canvas.rect(bx, y + h - 1 - bh, bw - gap, bh, col)
+
     def render_progress(self):
         self.header('处理中', '')
         p = self.progress or {}
-        phase = PHASE_CN.get(p.get('phase', ''), p.get('phase', ''))
+        phase = p.get('phase', '')
+        cname = PHASE_CN.get(phase, phase)
         done, total = p.get('done', 0), p.get('total', 1)
         pct = (done / float(total)) if total else 0.0
-        self.txt(str(phase), 20, HEADER_H + 40, ACCENT, self.f_row)
+        self.txt(str(cname), 20, HEADER_H + 40, ACCENT, self.f_row)
         self.txt(str(p.get('msg', ''))[:46], 20, HEADER_H + 72, TEXT, self.f_small)
         bx, by, bw, bh = 20, HEADER_H + 120, self.ww - 40, 26
         self.canvas.rect(bx, by, bw, bh, 0xFF2E2E2E)
@@ -953,6 +1248,35 @@ class App(object):
         if total > 1:
             self.txt_r('%s / %s' % (inst.human(done), inst.human(total)),
                        bx + bw - 10, by + 3, WHITE, self.f_small)
+
+        # ---- 传输速度 ---------------------------------------------------
+        # 只在 'copy' 阶段画：其它阶段的 done/total 不是"字节流"，
+        # 摆一个 0 KB/s 在那儿只会让人以为传输卡了。
+        if phase == 'copy' and total > 1:
+            sp = self.copy_speed()
+            y = by + bh + 14
+            self.txt('速度', bx, y + 5, TEXT_MUTE, self.f_small)
+            if sp > 0:
+                sp_text = self.human_speed(sp)
+                self.txt(sp_text, bx + 44, y, ACCENT, self.f_row)
+                # 剩余时间：拿"剩余字节 / 当前速度"。速度是滑窗均值，
+                # 所以它会跟着网速一起变 —— 这正是用户想看到的。
+                remain = total - done
+                self.txt_r('剩余 %s' % self.human_time(remain / sp),
+                           bx + bw, y + 5, TEXT_DIM, self.f_small)
+                # 「已用」紧跟在速度后面 —— 按**实际文字宽度**定位而不是
+                # 写死一个 x：速度字符串长度是会变的（"9.80 KB/s" 和
+                # "102.40 MB/s" 差一倍宽），写死就会撞在一起。
+                self.txt('已用 %s' % self.human_time(self.speed_elapsed()),
+                         bx + 44 + self.f_row.width(sp_text) + 22, y + 5,
+                         TEXT_MUTE, self.f_small)
+                self._draw_speed_hist(bx, y + 30, bw, 26)
+            else:
+                # 停顿中（NAS 掉线 / 源文件在转 / 就快写完了）。
+                # 不要报 0 KB/s —— 0 读起来像"坏了"，这里要的是"等着呢"。
+                self.txt('—  等待数据…', bx + 44, y, TEXT_MUTE, self.f_row)
+                self._draw_speed_hist(bx, y + 30, bw, 26)
+
         self.footer([('', '请稍候…')])
 
     # ------------------------------------------------------------ 消息
@@ -1389,17 +1713,35 @@ class App(object):
             self.sys_top = self.sys_sel - VIS_ROWS + 1
 
     def _handle_games(self, act):
-        """卡片网格的输入：二维移动，A 装 / X 播 / Y 卸，右摇杆滚简介
+        """卡片网格的输入：A 装 / X 播 / Y 卸，右摇杆滚简介
 
         0.5.0 起不再有独立的详情页 —— 详情就是右栏，选中即所见。
         所以 A 直接安装、X 直接播视频，不用先进详情页。
+
+        ## 移动模型（0.6.0 按用户反馈改过，别再改回去）
+
+        | 键 | 作用 |
+        |---|---|
+        | 左 / 右 | **只在本行内移动**，到行首/行尾就停住 |
+        | 上 / 下 | 上下一行；**滚动只由这两个键触发** |
+        | L1 / R1 | 翻一整页 |
+
+        两条硬规则，都是用户明确提的：
+
+        1. **左右不跨行。** 跨行会有两个后果：光标斜着跳到下一行第一列，
+           而且（配合老的居中视口）整屏一起滚 —— 用户的原话是
+           「第三行第一列向右只会向下换行」「网格会出现横向滚动，不够直观」。
+           4 列全都在屏上，按不到"看不见的列"，所以不跨行不会漏游戏。
+        2. **滚动只在光标要跑出可见区时才发生**（见 render_games 的视口段），
+           一次一行。4 行可见时前 3 行完全不滚 —— 用户要的「第四行开始滚动」。
         """
         n = len(self.games)
         if not n:
             if act == 'back':
                 self.screen = 'systems'
             return
-        cols = self._grid_metrics()[0]   # 只取列数，其余字段用不到
+        cols, rows = self._grid_metrics()[:2]
+        per_page = cols * rows
         sel = self.game_sel
 
         # 右摇杆上下 = 滚动右栏简介。与网格导航互不干扰，各自独立。
@@ -1412,18 +1754,33 @@ class App(object):
                 self.desc_scroll = 0
             return
 
+        # ---- 左右：**只在本行内移动**（0.6.0 改）----------------------------
+        # 以前 `sel -= 1 / sel += 1` 是能跨行的：在第 N 行最右按右键会跳到
+        # 第 N+1 行第 1 列。配合当时"居中跟随"的视口，整屏还会跟着一起滚，
+        # 于是用户看到的就是「按右键，网格往下换了一行」。
+        #
+        # 现在改成到本行边缘就停住：右键永远只表示"往右"，
+        # **不可能引起纵向滚动**（滚动只由上下键触发）。
+        # 要在同一列继续往下，用下键 —— 4 列全都在屏上，不存在"看不到右边
+        # 那一列"的问题，所以不会因此漏掉任何游戏。
+        col = sel % cols
         if act == 'left':
-            sel -= 1
+            if col > 0:
+                sel -= 1
         elif act == 'right':
-            sel += 1
+            if col < cols - 1 and sel + 1 < n:
+                sel += 1
         elif act == 'up':
-            sel -= cols
+            if sel - cols >= 0:
+                sel -= cols
         elif act == 'down':
-            sel += cols
+            if sel + cols < n:
+                sel += cols
         elif act == 'pgup':
-            sel -= cols * 2
+            sel = max(0, sel - per_page)
         elif act == 'pgdn':
-            sel += cols * 2
+            # 翻一整页（不是半页）：L1/R1 在底栏写的就是"翻页"
+            sel = min(n - 1, sel + per_page)
         elif act == 'back':
             self.screen = 'systems'
             return
@@ -1445,6 +1802,18 @@ class App(object):
         self.game_sel = sel
 
     # ------------------------------------------------------------ 主循环
+    def stop(self):
+        """请求主循环退出（异步安全：只改一个 bool）
+
+        给信号处理器用的。**不要把这里写成抛异常** —— 信号可能在任意两条
+        字节码之间到达，抛异常会从 SDL 调用、封面解码、SMB 读中间穿出去，
+        轻则漏掉清理，重则把已经释放的 surface 再用一次（段错误）。
+
+        只置位就够了：run() 每帧（约 30fps）都看一次 self.running，
+        下一帧就走正常收尾路径（close -> vplayer.shutdown -> 收掉 mpv）。
+        """
+        self.running = False
+
     def run(self):
         fps_delay = 1.0 / 30.0
         while self.running:
@@ -1557,7 +1926,18 @@ def goto_game(app, gid):
     for i, gg in enumerate(app.games):
         if gg['id'] == g['id']:
             app.game_sel = i
-            app.game_top = 0        # 渲染时会按 game_sel 重新居中
+            # 落点：把目标摆在**中间一行**（看预览回来时视线不用再找）。
+            #
+            # ⚠️ 这里必须显式给初值，不能让渲染去反推居中 ——
+            # 0.6.0 改成"最小滚动"之后，视口是粘性状态，按键永远不会
+            # 主动居中；想去反推居中就等于把用户抱怨过的那个毛病
+            # （任何按键都带着整屏滚）装回来。跳转是"一次性定位"，
+            # 和"按键导航"是两件事，所以在这里单独算。
+            cols, rows = app._grid_metrics()[:2]
+            total_rows = (len(app.games) + cols - 1) // cols
+            top_row = i // cols - rows // 2
+            top_row = max(0, min(top_row, max(0, total_rows - rows)))
+            app.game_top = top_row * cols
             return True
     return False
 

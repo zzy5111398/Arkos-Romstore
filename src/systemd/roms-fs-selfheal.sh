@@ -28,6 +28,13 @@
 
 set -u
 
+# fsck.exfat 在 /usr/sbin（126 实测），而普通用户 PATH 不含 sbin。
+# 本脚本既可能由 root 跑也可能被用户手跑，两种都要能找到。
+case ":$PATH:" in
+    *:/sbin:*) ;;
+    *) PATH="$PATH:/sbin:/usr/sbin"; export PATH ;;
+esac
+
 LOG_TAG="roms-fs-selfheal"
 DEV="/dev/mmcblk0p3"
 ROMS="/roms"

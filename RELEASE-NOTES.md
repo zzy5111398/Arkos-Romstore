@@ -1,8 +1,131 @@
 # ROM 商店 · 版本说明
 
-> **当前版本：0.5.0**（2026-10-12）
-> 发布包：`ark-romstore-0.5.0.tar.gz` / `ark-romstore-0.5.0.zip`
-> 适用设备：ArkOS4Clone（R36S / R36 Ultra 及同类 aarch64 掌机）
+> **当前版本：0.6.0**（2026-10-12）
+> 发布包：`ark-romstore-0.6.0.tar.gz` / `ark-romstore-0.6.0.zip`
+> 适用设备：**ArkOS4Clone**（R36S / R36 Ultra 及同类 aarch64 掌机）
+> 　　　　　**AURKNIX / ROCKNIX**（Powkiddy X35S 等 RK3566 掌机）
+> 　　　　　**DarkOS / dArkOS**（R36S 等 aarch64 掌机）
+> 安装时**自动识别**，同一个安装包，三条路径（见第二节 0.6.0）
+
+---
+
+## 0.6.0 这一次改了什么（一句话）
+
+**同一个安装包，三族不同架构的掌机都能装。** 安装器自己判断这是哪一族，
+然后走对应的那套路径、挂载后端、显示驱动、开机自启方式和系统名映射表。
+
+| 项 | ArkOS（老 R36S） | AURKNIX / ROCKNIX（X35S） | DarkOS（dArkOS，R36S） |
+|---|---|---|---|
+| 程序目录 | `/home/ark/.romstore` | `/storage/.romstore` | `/home/ark/.romstore` |
+| NAS 挂载点 | `/mnt/Roms` | `/storage/nas-roms` | `/mnt/Roms` |
+| NAS 传输 | 内核 cifs（`vers=2.1`） | **rclone 的 FUSE 挂载** | 内核 cifs（`vers=2.1`） |
+| 显示 | SDL/KMSDRM | SDL/**Wayland** | SDL/KMSDRM |
+| ES 入口 | Options 菜单 → `/opt/system` | Ports 菜单 → `/storage/roms/ports` | Ports 菜单 → `/roms/ports` |
+| ES 系统名 | 传统长名 | 传统长名 | **Batocera 短名**（没有 `options`） |
+| 开机自启 | `/etc/systemd/system` | `/storage/.config/system.d` + 软链 | `/etc/systemd/system` |
+| 用户 | `ark`（要 sudo 提权） | `root`（**没装 sudo**） | `ark`（要 sudo 提权） |
+
+装完之后三台机器上的用法**完全一样**：进 ES 的菜单，选「ROM 商店」，
+手柄 `A` 安装、`X` 播预览、`Y` 卸载。
+
+### 为什么 ROCKNIX 那边要换一套传输方式
+
+不是偷懒换的，是**这台内核里真的没有 cifs**：
+
+```
+$ mount -t cifs //10.168.1.100/Roms /storage/nas-roms
+mount: /storage/nas-roms: unknown filesystem type 'cifs'.
+```
+
+- `/proc/filesystems` 里没有 `cifs`
+- `/lib/modules` 里没有 `cifs.ko`
+- 连用户态的 `mount.cifs` 都没有
+
+所以改用设备自带的 **rclone**（1.71，自带 `:smb` 后端）做 FUSE 挂载。
+这一步还踩了个坑：rclone 挂 FUSE 时只找 `fusermount3`，而这台只带了
+`fusermount`(v2)，会直接报
+
+```
+CRITICAL: Fatal error: failed to mount FUSE fs: fusermount: exec:
+          "fusermount3": executable file not found in $PATH
+```
+
+安装器会在 `<程序目录>/bin` 放一个 `fusermount3 -> /usr/bin/fusermount`
+的软链把名字补上，并把这个目录排到 `PATH` 最前面。**安装时会自动做，不用手动。**
+
+### 0.6.0 一并做的八件事（都是在真机上试出来的）
+
+**1. 右栏内嵌预览换了引擎。** ROCKNIX 上**没有 ffmpeg 命令行**（全盘都没有），
+0.5.0 那条「ffmpeg 往管道吐 JPEG」的路不成立。改用设备自带的 **mpv** 把每帧
+写成图片（`--vo=image`）+ `--hwdec=auto-safe` 走 rkvdec 硬解。对用户的意义是
+**画面更完整**：ArkOS / DarkOS 那两台受限于纯软解，只解 I 帧（丢 B/P 帧）才跑得动；
+X35S 有真 VPU，可以全帧解码。两条后端由程序**按机器上有什么工具**自己挑
+（不是写死平台），两个都没有时才退回「右栏只显示封面」。
+
+**2. 卡片网格去掉了标题、封面放大。** 封面下面原本压着一行标题文字，
+现在卡片上只有封面（没有封面的游戏才在中间写名字兜底）。腾出的高度全部
+给了封面：从 5 列 × 4 行 / 71px 变成 **4 列 × 4 行 / 91px**。
+
+**3. 网格改成「只纵向滚动、左右不跨行」。** 以前视口是居中跟随的，选中项
+一到第 3 行整屏就跟着滚，光标像被钉住 —— 按右键看起来像"网格往下换行"。
+现在**只有上下键会引起滚动**，而且光标在第 1~3 行时画面完全不动，
+从第 4 行再往下才开始滚；左右键只在本行内移动。翻页键 `L1/R1` 改成翻一整页。
+
+**4. 进度页新增「复制速度」。** 复制 ROM 时不再只有一条百分比：
+显示实时速度、已用时间、剩余时间和最近 60 个瞬时速度的曲线。
+速度卡住时会显示「— 等待数据…」而不是继续挂着一个好看的数字。
+
+**5. 收掉孤儿预览进程。** 旧版在界面进程被强杀时会留下 mpv 孤儿：它会一直
+往 `/tmp` 写 jpg（实测 10 分钟 2741 个 / 22MB），还会占着声卡让新预览变静音
+（实测残留过 3 个）。现在界面进程装了信号处理器，正常收尾；启动时也会扫一遍
+`/proc` 把上次的残留收掉。
+
+**6. 卸载 / 重装的往返在真机上跑通了，并顺手修掉一个"越装越脏"的问题。**
+`uninstall.sh` 的完整往返（卸载脚本本身，不是应用内的 `Y` 卸载）以前**从没在
+真机上跑过**。这次补上，一跑就发现 `ports/gamelist.xml` 的哈希变了 —— 撤销入口
+条目时只回退了行首缩进，块前面那个换行原地留成了一行空行，于是**每跑一次
+install/uninstall 往返就多攒一个空行**。
+
+语义上无害（XML 里空行没有意义），但它是**单调累积**的：装得越多越脏，而且
+破坏了"往返后字节复原"这条承诺。现在删除时连块前的换行一起删。真机实测：
+
+```
+起点        edb108fe…      ← 已注册
+uninstall 1 64d80069…      ← 删干净
+install   1 edb108fe…      ← 逐字节复原 ✅
+```
+
+新增 `tests/test_gamelist_roundtrip.py`：5 种文件形态（LF / CRLF / 带 BOM /
+空骨架 / 末尾无换行）× **连跑 3 次往返**，每次都要与原文**逐字节相同**。
+
+**7. 支持第三族固件 DarkOS（dArkOS）。** 这台看着像 ArkOS（根可写、
+`/home/ark` 属主是 `ark`、`/opt/system` 在、`/roms` 也是 exFAT），
+**但 ES 整套换了 Batocera 风格的系统名** —— 没有 `options` 系统（入口必须走
+`Ports` → `/roms/ports`），`PSP` 只有 `ppsspp`、`PS1` 叫 `psx`、
+`Atomiswave` 的 ES 名带空格（`Sega Atomiswave`）。所以：新增一张 70 条的
+DarkOS 映射表，其余复用 ArkOS 那套分支。
+
+它还有个「认不出来」的坑：`/etc/os-release` **自报 `Debian GNU/Linux`**，
+既没有 ROCKNIX 字样也没有自己的标记，只能靠 hostname 兜底
+（实测 `darkosre-r36`）。万一没认出来，`sudo ./install.sh --platform darkos`
+可以直接指定。
+
+顺带修掉 3 个只有这台才踩得到的 bug：`ark` 的 PATH **不含 `/usr/sbin`**
+（装好的 `mount.cifs` / `fsck.exfat` 会被误报「未安装」）、
+`sudo -- "$0"` 在相对路径下报 command not found、缺 `fsck.exfat` 时自动补装。
+
+**8. 开机不再被 NAS 挂载拖慢 2 分半。** 用户量到 `multi-user.target @2min38s`。
+根因是 `Type=oneshot` + enable 的副作用：只要 unit 被 enable 到
+`multi-user.target.wants/`，systemd 就会**自动**给它加 `Before=multi-user.target`，
+整个开机都得等它跑完；NAS 不在线时 rclone 重试到超时（153 秒）。
+
+现在挂载改由新增的 `nas-roms.timer` 在**开机后 20s / 90s / 5min** 各触发一次，
+`Before=multi-user.target` 随之消失，**开机零等待**，网络就绪后再补挂。
+`install.sh` 会自动清理旧版遗留的那条开机软链。
+⚠️ 所以**不要再 `systemctl enable nas-roms.service`** —— 启用 / 停用一律走
+`systemctl enable/disable nas-roms.timer`。（顺带记一个坑：timer 的重试**不能**
+用 `OnUnitActiveSec`，这个 service 成功后长期停在 `active`，实测 `list-timers`
+的 NEXT 直接变成 `-`；重试只能用多个 `OnBootSec`。）
 
 ---
 
@@ -88,7 +211,7 @@ SS 剩下的一成多是 NAS 上两个目录里都确实没有文件，属素材
 
 | 能力 | 说明 |
 | --- | --- |
-| 浏览 | 按平台进游戏列表；**游戏页是封面卡片网格 + 右栏详情**，一屏 15 款（0.5.0） |
+| 浏览 | 按平台进游戏列表；**游戏页是封面卡片网格 + 右栏详情**，一屏 16 款（0.6.0） |
 | 搜索 | 无（掌机没键盘；文本输入能力已有，但只服务于设置项） |
 | 安装 | **`A` 键**，带**空间预检**，不够会拒绝并告诉你要多少；**顺带导入封面** |
 | 卸载 | `Y` 键，进回收站 `/roms/.romstore-trash/`，**不是直接删**；封面一并清理 |
@@ -97,7 +220,7 @@ SS 剩下的一成多是 NAS 上两个目录里都确实没有文件，属素材
 | 重扫 | `Start` →「重扫 NAS」，NAS 加了新游戏后刷新索引 |
 | 换源 | `Start` →「修改商店源」，掌机上直接换 NAS / 共享 / 账号 |
 | 局域网扫描 | 设源时按 `X`，自动列出开着 445 端口的主机（实测 1.97 秒） |
-| 开机挂载 | systemd 服务 + 网络重连补挂，**和商店共用一份配置** |
+| 开机挂载 | `nas-roms.timer` 在开机后 20s/90s/5min 触发挂载（**不拖慢开机**），**和商店共用一份配置** |
 
 **按键**（游戏页）：方向键二维移动 · `A` 安装 · `X` 播放预览 · `Y` 卸载 ·
 `B` 返回 · `L1`/`R1` 翻页 · `Start` 菜单
@@ -326,7 +449,46 @@ sudo journalctl -u roms-fs-watch -n 50            # 看它有没有发现过问�
 
 ---
 
-## 四、0.5.0 的验证状态
+## 四、验证状态
+
+### 0.6.0 在 X35S（AURKNIX / ROCKNIX）真机的验证
+
+| 项目 | 结果 |
+| --- | --- |
+| 包完整性 | ✅ `sha256sum -c SHA256SUMS` 通过（`9b067db2…`） |
+| 全新安装 `install.sh --skip-index` | ✅ 自检 14 项全绿，含「右栏内嵌预览可用：mpv 帧服务」 |
+| 平台自动识别 | ✅ 认成 `rocknix`（AURKNIX），入口落在 **Ports** 菜单 |
+| NAS 挂载（rclone FUSE） | ✅ `/storage/nas-roms`，81 个顶层条目，无 cifs 依赖 |
+| 索引 | ✅ 8,446 款可读 |
+| 卡片几何 | ✅ 640×480 实算 **4 列 × 4 行 / 卡宽 91px / 每屏 16 款** |
+| 网格滚动 | ✅ 连按"下"：前 3 次 `top` 不动，**第 4 次才滚**（选中第 5 行） |
+| 网格左右键 | ✅ 第 3 行第 1 列按右键 sel 8→9→10→11，**`top` 全程 0**；全扫 64 个位置，右键引起纵向滚动 **0 次** |
+| `goto_game` 落点 | ✅ sel=300(row 76) → top_row=74，可见行 74..77（正好居中） |
+| 复制速度计 | ✅ 198.36 MB 的 PS1 `.chd`：冷读 **2.55 MB/s**、rclone 缓存命中 **31.73 MB/s**，读数/已用/剩余均正常 |
+| 孤儿 mpv 清理 | ✅ 3 个残留全部收掉，**误杀 0**（dry-run 扫 163 个 pid 只命中商店自己那只） |
+| 完整卸载 → 重装往返 | ✅ 卸载零残留；重装自检全绿；`gamelist.xml` **逐字节复原** |
+| 从 ES 启动 | ✅ 用户从 ES → Ports 真按「ROM 商店」启动成功（进程链 `runemu.sh → RomStore.sh → run.py`） |
+
+**已知但未处理**：这台机器的界面帧率偏低（单帧 85~127 ms，约 8~12 fps）。
+A/B/C 三段实测显示**不开视频也有 49~72% CPU**，所以主因不在视频解码上。
+
+### 0.6.0 在 DarkOS（dArkOS，R36S）真机的验证
+
+| 项目 | 结果 |
+| --- | --- |
+| 平台自动识别 | ✅ `hostname=darkosre-r36` → 认成 `darkos`（这台的 os-release 自报 Debian，认不出） |
+| ES 入口 | ✅ 落在 **Ports** 菜单（`/roms/ports/`），`RomStore.sh` 存在且 777 |
+| ES 系统名映射 | ✅ 按 Batocera 短名解析（`es_systems.cfg` 140 个 system、无 `options`） |
+| 索引 | ✅ 78 个 NAS 目录 → **68 个系统 / 8358 款**（去重 1522 条），耗时 75 秒 |
+| 完整安装链路 | ✅ 真游戏「火焰纹章 英雄之路」(GBA, `id=3905`)：装 → 封面 → ES 可见 → 卸载 |
+| 安装耗时 | ✅ **3.27 秒**，2 个 ROM / 25.38 MB，**自动生成 `.m3u`** |
+| 封面导入 | ✅ `boxfront.png` 765 KB，gamelist 新增 1 条并指向 `.m3u` |
+| 卸载往返 | ✅ ROM + 封面进 `/roms/.romstore-trash/<时间戳>/`，gamelist 移除后**尾部字节级回到 `</gameList>`，无残留空行** |
+
+**⚠️ 这台还没验证的**：商店界面的实际渲染与 `X` 键 mpv 全屏预览没在掌机上点过
+（装 / 封面 / ES 可见 / 卸载四条链路都已实测通过）。
+
+### 0.5.0 的验证状态
 
 **0.5.0 已在真机（`r36s`，10.168.1.126）验证**，重点是这一版修的跨目录素材缺失：
 
@@ -340,8 +502,9 @@ sudo journalctl -u roms-fs-watch -n 50            # 看它有没有发现过问�
 | 右栏视频播放 | ✅ 有声有画，切换游戏不串帧（按 gid 校验） |
 | 文件大小显示 | ✅ 后台 `SizeLoader` 建表，不阻塞界面 |
 
-**⚠️ 仍未验证：`uninstall.sh` 完整卸载 → 重装的往返**（卸载脚本本身，不是应用内卸载），
-照实保留。应用内卸载（`Y` 键 / `cli --remove`）已验证。
+**✅ `uninstall.sh` 完整卸载 → 重装的往返已在 0.6.0 补齐** —— 在 X35S 真机上跑通，
+且顺手修掉了「每往返一次 gamelist 多一个空行」（见第二节 0.6.0 第 6 条）。
+应用内卸载（`Y` 键 / `cli --remove`）自 0.4.0 起已验证。
 
 **已知未修的数据问题**（不是 bug）：NAOMI 有 53 个 `gdl-xxxx.chd` 未收录，
 是根目录同名 `.zip` 的重复；GBA 有 3 个汉化版 zip 没有封面。
@@ -422,18 +585,21 @@ sudo journalctl -u roms-fs-watch -n 50            # 看它有没有发现过问�
 
 ### 掌机
 
-| 项 | 要求 | 实测环境 |
-| --- | --- | --- |
-| 系统 | ArkOS4Clone 或同源 aarch64 ArkOS 分支 | aarch64 / Linux 4.4.189 / Ubuntu 19.10 |
-| 用户 | 有 `sudo` 权限的普通用户 | `ark`（uid/gid 1002，NOPASSWD sudo） |
-| Python | ≥ 3.5，仅用标准库 | 3.7.5 |
-| 图形库 | `libSDL2` + `libSDL2_ttf` | SDL2 2.32.10，`KMSDRM` / `offscreen` 驱动 |
-| 中文字体 | Noto CJK | `NotoSansCJK-Regular.ttc`（20 MB） |
-| 系统工具 | `mount.cifs` / `flock` / `mountpoint` / `nc` | 齐备 |
-| 手柄映射库 | `/opt/inttools/gamecontrollerdb.txt` | 由 ArkOS 固件提供 |
-| `/roms` 剩余空间 | 看你装什么 | exFAT，剩 13 G |
+三族固件任一即可（自动识别，见第二节）：ArkOS4Clone / AURKNIX·ROCKNIX / DarkOS。
+下表以 **ArkOS** 那台（R36S）为基准：
 
-缺少依赖时安装器会逐项标 ✘ 并停下：
+| 项 | 要求 | 实测环境（ArkOS） | 实测环境（DarkOS） |
+| --- | --- | --- | --- |
+| 系统 | ArkOS4Clone 或同源 aarch64 ArkOS 分支 | aarch64 / Linux 4.4.189 / Ubuntu 19.10 | aarch64 / Linux 4.4.189 / 自报 Debian |
+| 用户 | ArkOS / DarkOS 是 `ark`（要 sudo），ROCKNIX 是 `root`（**没装 sudo**） | `ark`（uid/gid 1002，NOPASSWD sudo） | `ark` |
+| Python | ≥ 3.5，仅用标准库 | 3.7.5 | 3.13.12 |
+| 图形库 | `libSDL2` + `libSDL2_ttf` | SDL2 2.32.10，`KMSDRM` / `offscreen` 驱动 | 同左 |
+| 中文字体 | Noto CJK（ROCKNIX 上从 scummvm 主题借） | `NotoSansCJK-Regular.ttc`（20 MB） | 同左 |
+| 系统工具 | `mount.cifs` / `fsck.exfat` / `flock` / `mountpoint` / `nc` | 齐备 | **`mount.cifs` + `fsck.exfat` 初始都缺，安装器自动补装** |
+| 手柄映射库 | `/opt/inttools/gamecontrollerdb.txt` | 由 ArkOS 固件提供 | 同左 |
+| `/roms` 剩余空间 | 看你装什么 | exFAT，剩 13 G | exFAT |
+
+缺少依赖时安装器会逐项标 ✘ 并停下（ROCKNIX 上没有包管理器，只报告不动手）：
 
 ```bash
 sudo apt-get install cifs-utils netcat-openbsd libsdl2-2.0-0 libsdl2-ttf-2.0-0 fonts-noto-cjk
@@ -455,7 +621,9 @@ Roms/                        ← SMB 共享名
 ```
 
 目录名用常见的短名即可（`FC` / `SFC` / `PSP` / `MD` / `PS1` / `SS` …），
-程序内置 **68 条**映射表翻成 EmulationStation 的系统名。
+程序内置**三张**映射表翻成 EmulationStation 的系统名
+（ArkOS 68 条 / ROCKNIX 72 条 / DarkOS 70 条，安装时按平台选一张 ——
+**三张不能互相抄**，同一个目录在三族固件上可能对应不同的系统名）。
 
 ### 网络
 
@@ -471,8 +639,11 @@ Roms/                        ← SMB 共享名
 | 项目 | 实测值 |
 | --- | --- |
 | 首次建索引（78 个 metadata，9.18 MB，走 CIFS） | **10.745 秒** |
+| 首次建索引（DarkOS，78 个 NAS 目录） | **75 秒** |
 | 增量重建（指纹全部命中） | **1.008 秒** |
 | 索引规模 | **8,210 款**（去重后）/ 68 个系统；`index.db` 1.76 MB |
+| 索引规模（ROCKNIX / X35S） | **8,446 款** |
+| 索引规模（DarkOS / R36S） | **8,358 款**（去重 1522 条）/ 68 个系统 |
 | 应用冷启动 | **2.114 秒** |
 | 详情页取描述（单文件 CIFS 读取） | **0.093 秒** |
 | 安装 2 KB 文件（目录已存在） | **0.101 秒** |
@@ -496,16 +667,19 @@ Roms/                        ← SMB 共享名
    不占 SD 空间（实测 4.8 MB/s 写速下，1.75 GB 镜像要 6 分钟）。NAS 上约 28,000 套素材都在
 2. **没有搜索框** —— 掌机无物理键盘。文本输入能力已经有了（手柄软键盘），
    但它只服务于「修改商店源」这类设置项，没接进游戏搜索
-3. **多碟游戏（`.m3u` 分支）代码已实现，但没用真实多碟游戏验证过**
-   （287 款多碟游戏，SS 独占 100）。**单文件大游戏已验证**（854 MB PSP ISO，md5 一致）
-4. **MAME 的 9 个分类目录**映射到 `mame2003`，属**推测**，需实机确认
+3. **多碟游戏（`.m3u` 分支）**：已在 DarkOS 真机上跑通一个 2 文件条目
+   （自动生成 `.m3u`、gamelist 指向它、装完在 ES 里可见、卸载字节级还原），
+   但**没在 ES 里真正启动过游戏**。**单文件大游戏已验证**（854 MB PSP ISO，md5 一致）
+4. **MAME 的 9 个分类目录**的归宿：ArkOS 上映射到 `mame2003`（推测）；
+   ROCKNIX 侧映射到 `mame`；DarkOS 上 `mame2003`(/roms/mame2003) 与
+   `mame2010`(/roms/mame) 并存 —— 三族都需实机确认
 5. **ES 装完新游戏后是否自动重扫**尚未验证 —— 若没自动出现，
    用 `Start` →「重扫 NAS」，或在 ES 里退出重进
 6. **卸载回收站不会自动清理** —— 需手动删 `/roms/.romstore-trash/`
 7. **账号密码走明文 NTLM**（SMB 2.1 协议使然）—— `source.json` 权限 600，
    但传输本身没加密。家用局域网够用，**不要暴露到公网**
-8. **挂载点固定 `/mnt/Roms`，不可配置** —— 有意为之，
-   `es_systems.cfg` 里 128 个系统的 `<path>` 都指向它
+8. **挂载点固定**（ArkOS / DarkOS `/mnt/Roms`、ROCKNIX `/storage/nas-roms`），不可配置 ——
+   有意为之，`es_systems.cfg` 里各系统的 `<path>` 都指向本机 ROM 根
 9. **列不出「这台主机上有哪些共享」** —— 掌机上没装 `smbclient`
    （装了会拖进一堆依赖），扫描只能告诉你哪些主机开着 445，共享名需手输
 
@@ -519,9 +693,9 @@ Roms/                        ← SMB 共享名
 # 可选：先核对下载到的包没被改动 / 没传坏
 sha256sum -c SHA256SUMS
 
-scp ark-romstore-0.5.0.tar.gz ark@<掌机IP>:/tmp/
+scp ark-romstore-0.6.0.tar.gz ark@<掌机IP>:/tmp/     # ROCKNIX 那台把 ark 换成 root
 ssh ark@<掌机IP>
-cd /tmp && tar xzf ark-romstore-0.5.0.tar.gz && cd ark-romstore-0.5.0
+cd /tmp && tar xzf ark-romstore-0.6.0.tar.gz && cd ark-romstore-0.6.0
 sudo ./install.sh --check                                  # 先干跑，不动文件
 sudo ./install.sh --host 10.168.1.100 --share Roms         # 正式装
 ```

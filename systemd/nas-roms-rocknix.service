@@ -1,0 +1,30 @@
+# AURKNIX / ROCKNIX 版：自启入口在 /storage/.config/system.d（这是该固件
+# 唯一可写的 systemd 单元目录 —— / 是只读 squashfs，连 /etc/systemd/system
+# 都不存在）。
+#
+# 挂载由 @@MOUNT_SCRIPT@@ 完成（内核没有 cifs，实际走 rclone 的 FUSE 挂载）。
+#
+# ⚠️ 本单元**故意没有 [Install] 段**：它由同目录的 nas-roms.timer 触发，
+#    不在 multi-user.target.wants/ 里挂软链。原因是 Type=oneshot 一旦被
+#    enable 到 multi-user.target.wants/，systemd 会给它加
+#    `Before=multi-user.target`，于是 multi-user.target 必须等挂载脚本跑完 ——
+#    NAS 不在线时 rclone 要重试到超时，整机开机被拖掉 2 分半
+#    （2026-10-14 真机实测：multi-user.target @2min38s，其中 153 秒是它）。
+#    由 timer 触发就没有这个问题。
+#    启用/停用请用 nas-roms.timer，**不要** systemctl enable nas-roms.service。
+[Unit]
+Description=Mount NAS Roms share at @@MOUNT_POINT@@ (rclone FUSE)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# HOME 指向 /storage：root 的默认 HOME 在只读镜像上，任何写 ~ 的动作都会失败
+Environment=HOME=/storage
+# rclone 的 FUSE 挂载要用 fusermount；本机只有 fusermount(v2)，安装器在
+# store/bin 放了同名桥接，这里把它排到 PATH 前面（脚本内部也会再加一次）
+Environment=PATH=@@EXTRA_PATH@@:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=@@MOUNT_SCRIPT@@
+ExecStop=@@MOUNT_SCRIPT@@ --stop
+TimeoutStartSec=200

@@ -381,7 +381,12 @@ def cmd_covers(nas_dir, check_content, sample, verbose):
                                 _t.localtime(es['gamelist_newest'])))
         if es.get('stale'):
             print('  ⚠️  gamelist 比 ES 重读时间新 —— 封面不会显示！')
-            print('     修：touch /tmp/es-restart && kill $(pidof emulationstation)')
+            if config.PLATFORM == 'rocknix':
+                # ROCKNIX：essway.service 带 Restart=always，杀掉即自动拉起
+                print('     修：pkill emulationstatio'
+                      '   （只写 15 个字母，pkill 比的是 comm 名）')
+            else:
+                print('     修：touch /tmp/es-restart && kill $(pidof emulationstation)')
         else:
             print('  ✅ ES 已在 gamelist 修改后重读过（启动时间/缓存不旧）')
         print('  注：imagecache 只缓存「当前浏览到」的系统，条目少属正常')
@@ -618,11 +623,15 @@ def cmd_remove(gid, purge, dry):
 
 
 def cmd_register(undo=False):
-    """把入口注册进 EmulationStation 的 options 系统游戏列表（显示中文名）
+    """把入口注册进 EmulationStation 的游戏列表（显示中文名）
 
-    路径必须是 './RomStore.sh' 而不是 './Tools/RomStore.sh'：
-    es_systems.cfg 里 options 系统的 <path> 是 /opt/system/，
-    RomStore.sh 就直接放在 /opt/system/ 下（rootfs，换 SD 卡不丢）。
+    入口目录与所在系统随平台而变（都取自平台档案，别再写死）：
+
+      ArkOS    options 系统，<path> = /opt/system/          （在 rootfs）
+      ROCKNIX  ports   系统，<path> = /storage/roms/ports/  （在 /storage）
+
+    两边都要求 gamelist 里的 path 是 './RomStore.sh'（即与入口脚本同目录），
+    不要写成 './Tools/RomStore.sh' —— 那会让 ES 找不到文件。
 
     注：0.4.2 曾短暂加过一个独立的 VideoPlayer.sh 入口，已撤掉 ——
     播放预览视频改在商店详情页里（见 ui.request_play 与 RomStore.sh 的接力循环）。
@@ -658,6 +667,16 @@ def cmd_register(undo=False):
             s, en, _b = hit
             while s > 0 and text[s - 1] in ' \t':
                 s -= 1
+            # 连块前面那个换行一起删掉。
+            # 只回退缩进是不够的：块前的 '\n' 会原地留成一行空行，而
+            # register 是把条目插在 '</gameList>' 前面 —— 于是每跑一次
+            # install/uninstall 往返，gamelist 里就多攒一个空行。
+            # 真机往返实测：第一次卸载就多一个空行，md5 与原文件不再一致
+            # （语义无害，但破坏了"往返后字节复原"这条承诺）。
+            if s > 0 and text[s - 1] == '\n':
+                s -= 1
+                if s > 0 and text[s - 1] == '\r':
+                    s -= 1
             text = text[:s] + text[en:]
             removed += 1
         if not removed:

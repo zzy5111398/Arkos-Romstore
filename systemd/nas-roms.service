@@ -1,14 +1,18 @@
+# ⚠️ 本单元**故意没有 [Install] 段**：它由同目录的 nas-roms.timer 触发，
+#    不在 multi-user.target.wants/ 里挂软链。原因是 Type=oneshot 一旦被
+#    enable 到 multi-user.target.wants/，systemd 会给它加
+#    `Before=multi-user.target`，于是 multi-user.target 必须等挂载脚本跑完 ——
+#    NAS 不在线时要重试到超时（TimeoutStartSec），整机开机被拖慢。
+#    由 timer 触发就没有这个问题。
+#    启用/停用请用 nas-roms.timer，**不要** systemctl enable nas-roms.service。
 [Unit]
-Description=Mount NAS Roms share at /mnt/Roms
+Description=Mount NAS Roms share at @@MOUNT_POINT@@ (kernel cifs)
 After=network.target NetworkManager-wait-online.service
 Wants=network.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/sbin/nas-roms-mount.sh
-ExecStop=/bin/umount /mnt/Roms
+ExecStart=@@MOUNT_SCRIPT@@
+ExecStop=@@MOUNT_SCRIPT@@ --stop
 TimeoutStartSec=200
-
-[Install]
-WantedBy=multi-user.target

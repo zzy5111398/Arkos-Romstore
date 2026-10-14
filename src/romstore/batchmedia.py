@@ -335,8 +335,51 @@ def systems_with_gaps():
 #
 #   本函数把三层一次查清，免得再靠一堆临时 plink 命令拼凑。
 
-ES_CACHE = '/home/ark/.emulationstation/imagecache.db'
-ES_CONF = '/home/ark/.emulationstation/es_settings.cfg'
+# ES 把这两份文件放在 $HOME/.emulationstation 下，而 $HOME 随平台而变：
+#   ArkOS    HOME=/home/ark  → /home/ark/.emulationstation/
+#   ROCKNIX  HOME=/storage   → /storage/.emulationstation/
+#                              （实为 /storage/.config/emulationstation 的软链）
+# 优先用平台档案给的值，其次按候选目录挑第一个真实存在的（有的镜像两个都在）。
+_ES_DIR_CANDIDATES = []
+
+
+def _es_dirs():
+    """ES 状态目录候选，去重保序，档案给的排最前"""
+    if _ES_DIR_CANDIDATES:
+        return _ES_DIR_CANDIDATES
+    for p in (getattr(config, 'ES_CACHE_DB', ''),
+              getattr(config, 'ES_SETTINGS_CFG', '')):
+        d = os.path.dirname(p) if p else ''
+        if d and d not in _ES_DIR_CANDIDATES:
+            _ES_DIR_CANDIDATES.append(d)
+    for d in ('/storage/.emulationstation',
+              '/storage/.config/emulationstation',
+              '/home/ark/.emulationstation'):
+        if d not in _ES_DIR_CANDIDATES:
+            _ES_DIR_CANDIDATES.append(d)
+    return _ES_DIR_CANDIDATES
+
+
+def es_dir():
+    """挑一个真实存在的 ES 状态目录；都没有就返回首选（调用方自行判存在性）"""
+    cands = _es_dirs()
+    for d in cands:
+        if os.path.isdir(d):
+            return d
+    return cands[0] if cands else ''
+
+
+def es_cache_path():
+    return os.path.join(es_dir(), 'imagecache.db')
+
+
+def es_conf_path():
+    return os.path.join(es_dir(), 'es_settings.cfg')
+
+
+# 兼容旧名（模块级快照，仅供外部打印用；真参与判断的地方一律调上面的函数）
+ES_CACHE = es_cache_path()
+ES_CONF = es_conf_path()
 
 
 def _read_gamelist(es_path):
@@ -359,7 +402,7 @@ def _es_cache():
     """
     rows = {}
     try:
-        with open(ES_CACHE, 'r', errors='replace') as f:
+        with open(es_cache_path(), 'r', errors='replace') as f:
             for line in f:
                 line = line.rstrip('\n')
                 if not line or '|' not in line:
@@ -451,10 +494,11 @@ def audit(nas_dir=None, check_content=True, content_sample=0, progress=None):
         })
 
     # 层3：生效层 —— ES 缓存状态
-    es_info = {'cache_path': ES_CACHE, 'exists': os.path.isfile(ES_CACHE)}
+    cache_p = es_cache_path()
+    es_info = {'cache_path': cache_p, 'exists': os.path.isfile(cache_p)}
     if es_info['exists']:
         try:
-            st = os.stat(ES_CACHE)
+            st = os.stat(cache_p)
             es_info['mtime'] = st.st_mtime
         except OSError:
             es_info['mtime'] = 0

@@ -5,12 +5,13 @@
 
 ## 实测规律（2026-10-11，在 r36s 上核对过）
 
-NAS 侧（Pegasus 约定）：
+NAS 侧（Pegasus 约定）—— 下面是挂载点的相对结构，绝对前缀见 config.NAS_ROOT
+（ArkOS=/mnt/Roms，ROCKNIX=/storage/nas-roms）：
 
-    /mnt/Roms/FC/1943.zip                       ← ROM
-    /mnt/Roms/FC/media/1943/boxFront.jpg        ← 封面
-    /mnt/Roms/FC/media/1943/logo.png            ← 标题 logo
-    /mnt/Roms/FC/media/1943/video.mp4           ← 预览视频
+    <NAS>/FC/1943.zip                       ← ROM
+    <NAS>/FC/media/1943/boxFront.jpg        ← 封面
+    <NAS>/FC/media/1943/logo.png            ← 标题 logo
+    <NAS>/FC/media/1943/video.mp4           ← 预览视频
 
 **media 目录名 == ROM 文件名去掉扩展名**（`1943.zip` → `media/1943/`）。
 这条关系让素材路径**可以直接推导**，不必枚举 media 目录
@@ -106,7 +107,7 @@ def _listdir_ci(path):
 def find_asset(nas_system_dir, rom_name, kind='box_front', media_dir=None):
     """在 NAS 上找某个游戏的素材，返回 (绝对路径, 相对路径) 或 (None, None)
 
-    nas_system_dir: NAS 上该系统的目录，如 /mnt/Roms/FC
+    nas_system_dir: NAS 上该系统的目录，如 <NAS_ROOT>/FC
     rom_name:       ROM 文件名（如 1943.zip）或已知的 media 目录名（如 1943）
     kind:           'box_front' 或 'logo'
 

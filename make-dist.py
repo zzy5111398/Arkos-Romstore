@@ -92,6 +92,14 @@ def collect(root: pathlib.Path):
             continue
         if p.name.startswith(SKIP_PREFIX):
             continue
+        # 开发期的 "_" 目录（_covers / _out / _stage …）也要整棵跳过。
+        # ⚠️ 必须按**目录名**判，且排掉 `__*` —— 只看文件名的 SKIP_PREFIX
+        #    拦不住 `_out/multiplayer-games.md` 这类文件；而不排 `__` 又会把
+        #    `src/romstore/__init__.py` 一起误杀（缺了它 import 直接崩）。
+        #    （2026-10-15 实测：0.6.0 的包被这三个目录撑到 11.7 MB / 120 个文件）
+        if any(part.startswith(SKIP_PREFIX) and not part.startswith('__')
+               for part in rel.parts[:-1]):
+            continue
         if any(rel.match(g) for g in SKIP_GLOBS):
             continue
 
@@ -209,11 +217,22 @@ def main(argv=None):
             'src/romstore/cover.py', 'src/romstore/batchmedia.py',
             # ui.py 里 `from . import vplayer`，缺了整包装完直接起不来
             'src/romstore/vplayer.py',
+            # 0.6.0 起 config.py 的一切路径都从 platform.py 取，缺了 import 就崩
+            'src/romstore/platform.py',
+            'src/romstore/config.py',
+            'src/romstore/mapp.py',
             'systemd/nas-roms.service',
+            # ROCKNIX 用 rclone 版单元（内核没有 cifs），与上面那份按平台二选一
+            'systemd/nas-roms-rocknix.service',
+            # 挂载改由 timer 在开机后异步触发，避免 oneshot 挂 multi-user.target
+            # 导致开机被 NAS 超时拖住（见 nas-roms.timer 顶部注释）
+            'systemd/nas-roms.timer',
             'systemd/roms-fs-selfheal.service',
             'src/systemd/roms-fs-selfheal.sh',
             'systemd/roms-fs-watch.service',
-            'src/systemd/roms-fs-watch.sh']
+            'src/systemd/roms-fs-watch.sh',
+            # mpv 起不来时修 Mali 抢占 libgbm.so.1（Mali 掌机上按 X 无反应就是它）
+            'src/systemd/mpv-libgbm-fix.sh']
     have = {rel.as_posix() for _, rel, _ in items}
     missing = [n for n in need if n not in have]
     if missing:

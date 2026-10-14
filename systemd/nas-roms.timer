@@ -1,0 +1,38 @@
+# 与 nas-roms.service 配对：让 NAS 挂载在**开机之后异步进行**，不阻塞启动。
+#
+# 为什么需要它（2026-10-14 真机实测，X35H）：
+#   nas-roms.service 是 Type=oneshot。只要它被 enable 到 multi-user.target.wants/，
+#   systemd 就会给它加 `Before=multi-user.target` —— 于是 multi-user.target
+#   必须等它跑完。而 NAS 不在线时，挂载脚本要等 rclone 重试到超时（原来 200 秒），
+#   整机开机就被拖掉 2 分半（实测 multi-user.target @2min38s，其中 153 秒是它）。
+#   改由 timer 在开机后再触发，service 不再挂在 multi-user.target 上，
+#   `Before=multi-user.target` 随之消失，开机不再等它；网络就绪后 timer 再补挂。
+#
+# 实测证据（同一台机）：
+#   unit 未 enable（无 multi-user.target.wants 软链）→ Before=shutdown.target
+#   unit 已 enable（有软链）                        → Before=multi-user.target shutdown.target
+#
+# ⚠️ 不要再 `systemctl enable nas-roms.service` —— 那会把软链装回
+#    multi-user.target.wants/，`Before=multi-user.target` 又会回来，开机重新被拖慢。
+#    启用/停用统一走本 timer（`systemctl enable/disable nas-roms.timer`）。
+[Unit]
+Description=Mount NAS Roms share shortly after boot (non-blocking)
+
+[Timer]
+# 开机后给三次机会（都用 OnBootSec —— 见下面的说明为什么不用 OnUnit*Sec）：
+#   20s：网络已就绪（实测 WiFi 约在开机后 9 秒关联并拿到 IP）→ 绝大多数情况一次命中
+#   90s：NAS 本身启动较慢（和掌机一起上电）时的第二次机会
+#   5min：兜底
+OnBootSec=20s
+OnBootSec=90s
+OnBootSec=5min
+Unit=nas-roms.service
+
+# ⚠️ 为什么**不用** OnUnitActiveSec：本 service 是 oneshot + RemainAfterExit=yes，
+#    挂载成功后长期停在 active，不产生新的「激活时间戳」；实测此时
+#    `systemctl list-timers` 的 NEXT 变成 `-`，即不会再排期（真机验证过）。
+#    而失败时 unit 停在 failed（不经 inactive），OnUnitInactiveSec 同样不计时。
+#    所以重试只能靠**多个 OnBootSec** 这种绝对时间点，它不依赖 unit 状态。
+
+[Install]
+WantedBy=timers.target

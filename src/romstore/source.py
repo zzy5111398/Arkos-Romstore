@@ -4,19 +4,33 @@
 职责边界：
   1. ``source.json`` 是**全系统唯一的一份商店源真相**
      * 商店客户端读它来知道去哪挂载；
-     * 开机挂载脚本 /usr/local/sbin/nas-roms-mount.sh **也读它**，
+     * 开机挂载脚本 ``nas-roms-mount.sh`` **也读它**，
        所以「改了商店源」和「开机自动挂载」永远指向同一个共享，不会各说各话。
      * 文件不存在 / 损坏时，脚本回落到内置默认值 —— 保证开机挂载
        绝不会因为配置缺失而失败（这是硬要求，见 nas-roms-mount.sh 注释）。
   2. 局域网扫描：找出开了 445 的主机。掌机没有键盘，这是最主要的输入方式。
-  3. 挂载/卸载：**只调用 nas-roms-mount.sh**，复用同一把 flock
-     （/run/nas-roms.lock），避免和 systemd / NetworkManager dispatcher 抢锁。
+  3. 挂载/卸载：**只调用挂载脚本**，复用同一把 flock
+     （/run/nas-roms.lock），避免和 systemd / 网络管理器抢锁。
+
+## 两种挂载后端（0.6.0 起）
+
+    cifs    ArkOS：内核 cifs + mount.cifs，挂载源是 //host/share
+    rclone  AURKNIX/ROCKNIX：**内核没有 cifs**，用 rclone 的 FUSE 挂载
+
+后端由 ``platform.json`` 决定（config.MOUNT_BACKEND），本模块只负责
+「按配置调脚本 + 读回状态」，不自己拼挂载参数。
+
+⚠️ rclone 挂载在 ``/proc/mounts`` 里的源名是 ``:smb{xxxx}:Roms`` ——
+**认不出主机**。所以「挂的还是不是我配置的那个共享」不能像 cifs 那样
+比对源字符串，只能读挂载脚本写的状态文件 ``<STORE_DIR>/.mount-state``。
+（挂载脚本与客户端**必须**同时升级，老客户端 + 新脚本会判不出「源一致」。）
 
 实测约束（改之前先看这里）：
-  * 内核 cifs 只认 vers=2.1；vers=2.0 返回 EOPNOTSUPP(95)
-  * ark 用户 uid/gid = 1002
-  * 挂载点固定 /mnt/Roms —— es_systems.cfg 里所有 <path> 都指向它，改了全盘对不上
+  * ArkOS 内核 cifs 只认 vers=2.1；vers=2.0 返回 EOPNOTSUPP(95)
+  * 挂载点由平台档案决定（ArkOS=/mnt/Roms，ROCKNIX=/storage/nas-roms）
   * cifs 的 -o 是逗号分隔，所以账号/密码里**不能有逗号**（软键盘也不提供逗号）
+  * ROCKNIX 上 rclone 1.71 只找 fusermount3，而机器只有 fusermount(v2) ——
+    安装器会在 STORE_DIR/bin 放同名桥接，PATH 由挂载脚本自己加
 """
 import json
 import os
@@ -28,25 +42,43 @@ import threading
 
 from . import config
 
-SOURCE_PATH = os.environ.get('ROMSTORE_SOURCE',
-                             os.path.join(config.STORE_DIR, 'source.json'))
-MOUNT_SCRIPT = os.environ.get('ROMSTORE_MOUNT_SCRIPT',
-                              '/usr/local/sbin/nas-roms-mount.sh')
+SOURCE_PATH = os.environ.get('ROMSTORE_SOURCE', config.SOURCE_PATH)
+MOUNT_SCRIPT = os.environ.get('ROMSTORE_MOUNT_SCRIPT', config.MOUNT_SCRIPT)
 MOUNT_POINT = os.environ.get('ROMSTORE_MOUNT', config.NAS_ROOT)
+MOUNT_STATE = os.environ.get('ROMSTORE_MOUNT_STATE', config.MOUNT_STATE_PATH)
+BACKEND = config.MOUNT_BACKEND
 LOCK_PATH = '/run/nas-roms.lock'
 
 SMB_PORT = 445
 HOST_DEFAULT = '10.168.1.100'
 SHARE_DEFAULT = 'Roms'
-VER_DEFAULT = '2.1'
+VER_DEFAULT = config.SAMBA_VERS or '2.1'
 
 # cifs 选项是逗号分隔，且控制字符无意义 —— 一并剔除
 _BAD_CHARS = re.compile(r'[,\x00-\x1f\x7f]')
 
-# ark 用户是 uid/gid 1002（不是 1000）。Windows 上没有 os.getuid，
-# 这里兜底成 1002，保证模块在开发机上也能导入（真机取值一致）。
 _UID = getattr(os, 'getuid', lambda: 1002)()
 _GID = getattr(os, 'getgid', lambda: 1002)()
+
+
+def need_sudo():
+    """本机是否需要 sudo 前缀。
+
+    ArkOS 上是 ark 用户跑商店 → 需要 sudo -n；
+    ROCKNIX 上只有一个 root 用户，而且**没装 sudo** —— 传了会直接报
+    「sudo: not found」，看着像权限问题，其实是多余的。所以按 uid 判。
+    """
+    if _UID == 0:
+        return False
+    try:
+        return subprocess.call(['sh', '-c', 'command -v sudo >/dev/null 2>&1']) == 0
+    except Exception:
+        return False
+
+
+def _priv(args):
+    """给命令加 sudo 前缀（需要时才加）"""
+    return (['sudo', '-n'] + list(args)) if need_sudo() else list(args)
 
 
 # ------------------------------------------------------------------ 配置
@@ -168,11 +200,43 @@ def is_mounted(mp=None):
     return mounted_info(mp) is not None
 
 
+def mount_state():
+    """读挂载脚本写的状态文件（KEY=VALUE 行）
+
+    rclone 的挂载源名认不出主机（`:smb{hash}:Roms`），所以「挂的是不是我
+    配置里的那个共享」只能靠这个文件。脚本还没升级 / 文件没写出来时返回空字典，
+    调用方会自动退回到「比对 /proc/mounts 源名」的老办法。
+    """
+    d = {}
+    try:
+        with open(MOUNT_STATE, 'r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                line = line.strip()
+                if not line or '=' not in line:
+                    continue
+                k, v = line.split('=', 1)
+                d[k.strip()] = v.strip()
+    except Exception:
+        return {}
+    return d
+
+
 def matches(cfg=None, mp=None):
     """当前挂载的是不是就是配置里的那个共享"""
     info = mounted_info(mp)
     if not info:
         return False
+    cfg = cfg or load()
+    st = mount_state()
+    if st.get('HOST'):
+        if st.get('HOST') != cfg['host'] or st.get('SHARE') != cfg['share']:
+            return False
+        # 后端也要一致：换平台时同一个挂载点下可能是另一种后端残留的挂载
+        return (st.get('BACKEND') or 'cifs') == BACKEND
+    # 老版脚本没写状态文件 —— cifs 只能靠源名比对（rclone 的源名认不出主机，
+    # 此时只能认为「挂上了且是 fuse.rclone」就算一致）
+    if BACKEND == 'rclone':
+        return info[1].startswith('fuse.rclone')
     return info[0].rstrip('/') == unc_path(cfg).rstrip('/')
 
 
@@ -182,7 +246,11 @@ def status_text(cfg=None):
         return '未挂载'
     src, fstype = info
     tag = '' if matches(cfg) else '（与当前源不一致）'
-    return '已挂载 %s %s%s' % (src, fstype, tag)
+    st = mount_state()
+    who = ''
+    if st.get('HOST'):
+        who = ' -> //%s/%s' % (st['HOST'], st.get('SHARE', ''))
+    return '已挂载 %s %s%s%s' % (src, fstype, who, tag)
 
 
 def ping_port(host, port=SMB_PORT, timeout=1.5):
@@ -211,10 +279,19 @@ _HINTS = [
     ('host is down', '主机不可达 —— 检查 NAS 是否开机'),
     ('no route to host', '网络不可达 —— 掌机与 NAS 不在同一网段'),
     ('already mounted', '挂载点已被占用'),
-    ('invalid argument', '挂载参数不被支持（本机内核 cifs 只认 vers=2.1）'),
-    ('operation not permitted', '操作被拒绝 —— 检查 sudo 免密是否仍然有效'),
+    ('invalid argument', '挂载参数不被支持（ArkOS 内核 cifs 只认 vers=2.1）'),
+    ('operation not permitted', '操作被拒绝 —— 检查权限（ROCKNIX 上是 root，不该出现）'),
     ('helper program', '缺 mount.cifs —— 在掌机上执行：apt-get install cifs-utils'),
-    ('eopnotsupp', '内核不支持该挂载参数（本机 cifs 只认 vers=2.1）'),
+    ('eopnotsupp', '内核不支持该挂载参数（ArkOS 上 cifs 只认 vers=2.1）'),
+    # ---- rclone/FUSE 后端（ROCKNIX）----
+    ('no such device', '内核不支持这个文件系统类型 —— 这台机器的内核没有 cifs，'
+                       '请用 rclone 后端（platform.json 的 mount_backend）'),
+    ('fusermount', '缺 fusermount —— rclone 挂 FUSE 需要它；'
+                   '这台只有 fusermount(v2)，安装器会做 fusermount3 名字桥接'),
+    ('transport endpoint is not connected', 'FUSE 挂载已失效（rclone 进程退过）。'
+                                            '先卸载再重挂即可'),
+    ('input/output error', 'FUSE 读取失败 —— 多半 rclone 进程已退出，重挂即可'),
+    ('rclone', 'rclone 报错 —— 上面那行是它的原话；最常见是 NAS 未开机或凭据不对'),
 ]
 
 _CODE_HINTS = {
@@ -251,7 +328,7 @@ def mount(cfg=None, force=True, wait=220):
                 'error': '连不上 %s:%d' % (host, SMB_PORT),
                 'hint': '检查主机地址、NAS 是否开机、共享是否开启'}
 
-    args = ['sudo', '-n', MOUNT_SCRIPT]
+    args = _priv([MOUNT_SCRIPT])
     if force:
         args.append('--force')
     env = dict(os.environ)
@@ -286,8 +363,9 @@ def mount(cfg=None, force=True, wait=220):
 
     info = mounted_info()
     want = unc_path(cfg)
-    if p.returncode == 0 and info and info[0].rstrip('/') == want.rstrip('/'):
-        return {'ok': True, 'unc': info[0], 'fstype': info[1], 'output': raw}
+    if p.returncode == 0 and info and matches(cfg):
+        return {'ok': True, 'unc': info[0], 'fstype': info[1],
+                'backend': BACKEND, 'output': raw}
     if info:
         return {'ok': False, 'mounted': info[0], 'request': want, 'hint': hint,
                 'error': err or ('挂载未生效（当前挂载 %s）' % info[0]),
@@ -300,7 +378,13 @@ def unmount(mp=None):
     if not is_mounted(mp):
         return {'ok': True, 'msg': '本来就没挂载'}
     last = ''
-    for c in (['sudo', '-n', 'umount', mp], ['sudo', '-n', 'umount', '-l', mp]):
+    # rclone 的 FUSE 挂载用 fusermount 卸更干净（umount 常常 EBUSY）
+    tries = []
+    if BACKEND == 'rclone':
+        tries.append(_priv(['fusermount', '-u', '-z', mp]))
+    tries.append(_priv(['umount', mp]))
+    tries.append(_priv(['umount', '-l', mp]))
+    for c in tries:
         try:
             p = subprocess.run(c, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                timeout=30)
