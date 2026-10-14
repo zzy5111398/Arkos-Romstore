@@ -29,12 +29,37 @@ GCM = r'C:\Users\admin\.workbuddy\binaries\PortableGit\versions\1.2.0\mingw64\bi
 
 
 def token():
-    p = subprocess.run([GCM, 'get'], input='protocol=https\nhost=github.com\n\n',
-                       capture_output=True, text=True)
-    for line in p.stdout.splitlines():
-        if line.startswith('password='):
-            return line.split('=', 1)[1].strip()
-    raise SystemExit('取不到 GitHub token')
+    """取 GitHub 凭据：先问 `git credential fill`，不行再退回 GCM。
+
+    ⚠️ 2026-10-15 踩到：本机 PortableGit 的 `mingw64/bin/` 里**根本没有**
+    `git-credential-manager.exe`（尽管 `git config credential.helper` 指向它），
+    原来只走 GCM 的写法会直接 FileNotFoundError 挂掉。
+    而 `git credential fill` 是通的 —— 它自己会走 helper + 系统凭据存储。
+    """
+    def parse(out):
+        for line in out.splitlines():
+            if line.startswith('password='):
+                return line.split('=', 1)[1].strip()
+        return None
+
+    try:
+        p = subprocess.run(['git', 'credential', 'fill'],
+                           input='protocol=https\nhost=github.com\n\n',
+                           capture_output=True, text=True)
+        tok = parse(p.stdout)
+        if tok:
+            return tok
+    except OSError:
+        pass
+
+    if os.path.exists(GCM):
+        p = subprocess.run([GCM, 'get'], input='protocol=https\nhost=github.com\n\n',
+                           capture_output=True, text=True)
+        tok = parse(p.stdout)
+        if tok:
+            return tok
+
+    raise SystemExit('取不到 GitHub token（git credential fill 与 GCM 都没给）')
 
 
 TOKEN = token()
