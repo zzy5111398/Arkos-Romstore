@@ -16,7 +16,7 @@
 
 商店源（NAS 共享）：
   python3 -m romstore.cli --source-show          当前源配置 + 挂载状态
-  python3 -m romstore.cli --source-set 10.168.1.100,Roms[,账号[,密码]]
+  python3 -m romstore.cli --source-set 10.168.1.110,Roms[,账号[,密码]]
   python3 -m romstore.cli --source-reset         恢复默认源
   python3 -m romstore.cli --scan-hosts [10.168.1]   扫描开 445 的主机
   python3 -m romstore.cli --mount [--force]      按当前配置挂载

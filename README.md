@@ -286,7 +286,7 @@ cd ark-romstore-0.6.0
 sudo ./install.sh --check
 
 # 正式安装（把 NAS 地址和共享名填上）
-sudo ./install.sh --host 10.168.1.100 --share Roms
+sudo ./install.sh --host 10.168.1.110 --share Roms
 ```
 
 > 缺依赖（ArkOS / DarkOS 上最常见是 `cifs-utils`）时安装器会**自动 `apt-get` 补装**，
@@ -303,7 +303,7 @@ sudo ./install.sh --host 10.168.1.100 --share Roms
 NAS 需要账号时：
 
 ```bash
-sudo ./install.sh --host 10.168.1.100 --share Roms \
+sudo ./install.sh --host 10.168.1.110 --share Roms \
                   --smbuser myuser --smbpass mypassword
 ```
 
@@ -356,7 +356,7 @@ sudo ./install.sh --host 10.168.1.100 --share Roms \
 同一个安装包再跑一次即可，**幂等**：
 
 ```bash
-sudo ./install.sh --host 10.168.1.100 --share Roms
+sudo ./install.sh --host 10.168.1.110 --share Roms
 ```
 
 源码被覆盖，`source.json`、索引、已装的游戏都保留。
@@ -483,7 +483,7 @@ sudo ./install.sh --host 10.168.1.100 --share Roms
 「开机挂的源」永远一致。
 
 万一这个文件丢了或写坏了，挂载脚本会回落到内置默认值
-（`10.168.1.100 / Roms / 匿名`）—— **宁可挂错也不能开机挂不上**，
+（`10.168.1.110 / Roms / 匿名`）—— **宁可挂错也不能开机挂不上**，
 装错了可以在商店里改回来。
 
 ---
@@ -510,7 +510,7 @@ python3 -m romstore.cli --build --force  # 全量重建
 
 # 商店源
 python3 -m romstore.cli --source-show
-python3 -m romstore.cli --source-set 10.168.1.100,Roms
+python3 -m romstore.cli --source-set 10.168.1.110,Roms
 python3 -m romstore.cli --scan-hosts            # 扫本机网段的 445
 python3 -m romstore.cli --mount --force         # 按当前源强制重挂
 python3 -m romstore.cli --umount
@@ -634,7 +634,7 @@ cat /storage/.romstore/.mount-state      # 挂载脚本写的状态文件
 
 ```bash
 # 1. 主机通不通、445 开没开
-python3 -m romstore.cli --probe-host 10.168.1.100
+python3 -m romstore.cli --probe-host 10.168.1.110
 # 2. 共享名对不对（本机那台 NAS 实测不区分大小写，但换了机器先核对拼写）
 python3 -m romstore.cli --source-show
 # 3. 手动看内核报错

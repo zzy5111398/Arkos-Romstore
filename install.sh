@@ -8,7 +8,7 @@
 #    darkos   DarkOS / dArkOS（R36S 等，根可写、**ES 是 Batocera 风格命名**）
 #
 #  用法：
-#     sudo ./install.sh --host 10.168.1.100 --share Roms
+#     sudo ./install.sh --host 10.168.1.110 --share Roms
 #     sudo ./install.sh                      # 沿用已有 source.json（全新装则用内置默认）
 #     sudo ./install.sh --check              # 只做前置检查，不动任何文件
 #     sudo ./install.sh --platform darkos    # 强制指定平台（一般不用）
@@ -127,8 +127,8 @@ ROM 商店安装器 v$VERSION（双平台：ArkOS / AURKNIX-ROCKNIX）
                                 # 提示 Permission denied 时用 bash install.sh
 
 
-商店源（可省；省了则沿用已有 source.json 或内置默认 10.168.1.100/Roms 匿名）:
-  --host H            NAS 主机（IP 或主机名），例：10.168.1.100
+商店源（可省；省了则沿用已有 source.json 或内置默认 10.168.1.110/Roms 匿名）:
+  --host H            NAS 主机（IP 或主机名），例：10.168.1.110
   --share S           共享名（不带 // 与主机），例：Roms
   --smbuser U         SMB 账号（留空 = 匿名 guest）
   --smbpass P         SMB 密码
@@ -978,7 +978,7 @@ else
     if [ -f "$STORE_DIR/source.json" ]; then
         ok "沿用已有 source.json（未指定 --host）"
     else
-        warn "没有指定 --host，先用内置默认：//10.168.1.100/Roms 匿名"
+        warn "没有指定 --host，先用内置默认：//10.168.1.110/Roms 匿名"
         warn "  装完可在商店里按 Start →「修改商店源」改"
     fi
 fi

@@ -697,7 +697,7 @@ scp ark-romstore-0.6.0.tar.gz ark@<掌机IP>:/tmp/     # ROCKNIX 那台把 ark �
 ssh ark@<掌机IP>
 cd /tmp && tar xzf ark-romstore-0.6.0.tar.gz && cd ark-romstore-0.6.0
 sudo ./install.sh --check                                  # 先干跑，不动文件
-sudo ./install.sh --host 10.168.1.100 --share Roms         # 正式装
+sudo ./install.sh --host 10.168.1.110 --share Roms         # 正式装
 ```
 
 > 缺依赖（最常见是 `cifs-utils`）时安装器会自己 `apt-get` 补上；
