@@ -60,11 +60,12 @@ esac
 export PATH
 
 # 内置默认值（source.json 不可用时的兜底）
-# ⚠️ 必须与 romstore/source.py 的 HOST_DEFAULT 保持一致 —— 两处都写死了兜底，
-#    只改一处会出现「商店连 A 主机、开机挂载连 B 主机」的鬼现象。
+# ⚠️ 必须与 romstore/source.py 的 HOST_DEFAULT / SMB_USER_DEFAULT 保持一致 ——
+#    两处都写死了兜底，只改一处会出现「商店连 A 主机、开机挂载连 B 主机」的鬼现象。
+# ⚠️ D_PASS 故意留空：本仓库是公开的，不写 NAS 口令。真密码在 source.json（600）里。
 D_HOST="10.168.1.110"
 D_SHARE="Roms"
-D_USER=""
+D_USER="smbshare"
 D_PASS=""
 D_VERS="2.1"
 

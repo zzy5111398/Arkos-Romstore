@@ -52,6 +52,12 @@ LOCK_PATH = '/run/nas-roms.lock'
 SMB_PORT = 445
 HOST_DEFAULT = '10.168.1.110'
 SHARE_DEFAULT = 'Roms'
+SMB_USER_DEFAULT = 'smbshare'
+# ⚠️ 默认密码**故意不写死**：本仓库是公开的，写进去等于把 NAS 口令公开。
+#    真密码只落两处：掌机上的 source.json（权限 600）、或安装时 --smbpass。
+#    需要把默认值「烤」进本地打包时，用环境变量 ROMSTORE_SMB_PASS 注入即可
+#    （make-dist 打出来的包里会有，但仓库里没有）。
+SMB_PASS_DEFAULT = os.environ.get('ROMSTORE_SMB_PASS', '')
 VER_DEFAULT = config.SAMBA_VERS or '2.1'
 
 # cifs 选项是逗号分隔，且控制字符无意义 —— 一并剔除
@@ -89,7 +95,8 @@ def sanitize(s):
 
 def defaults():
     return {'host': HOST_DEFAULT, 'share': SHARE_DEFAULT,
-            'user': '', 'password': '', 'vers': VER_DEFAULT}
+            'user': SMB_USER_DEFAULT, 'password': SMB_PASS_DEFAULT,
+            'vers': VER_DEFAULT}
 
 
 def normalize(cfg):
@@ -157,12 +164,20 @@ def describe(cfg=None):
     return '%s（%s）' % (unc_path(cfg), auth_label(cfg))
 
 
-def mount_opts(cfg=None):
+def mount_opts(cfg=None, mask=False):
+    """拼 cifs 的 ``-o`` 串。
+
+    ⚠️ ``mask=True`` 只给**打印/日志**用：把 password 换成等长星号。
+    真挂载必须走默认的 ``mask=False``，否则挂不上。
+    （2026-10-25：``--source-show`` 原来会把口令明文打进「挂载选项」那行，
+      随手截图/贴日志就等于把 NAS 密码交出去了。）
+    """
     cfg = cfg or load()
     parts = []
     if cfg.get('user'):
         parts.append('username=%s' % cfg['user'])
-        parts.append('password=%s' % cfg.get('password', ''))
+        pw = cfg.get('password', '') or ''
+        parts.append('password=%s' % (('*' * len(pw)) if (mask and pw) else pw))
     else:
         parts.append('guest')
     parts += ['vers=%s' % cfg.get('vers', VER_DEFAULT),

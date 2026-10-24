@@ -502,7 +502,7 @@ def cmd_source_show():
     print('vers       : %s' % cfg['vers'])
     print('挂载点     : %s' % src.MOUNT_POINT)
     print('挂载状态   : %s' % src.status_text(cfg))
-    print('挂载选项   : %s' % src.mount_opts(cfg))
+    print('挂载选项   : %s' % src.mount_opts(cfg, mask=True))
     print('挂载脚本   : %s  %s'
           % (src.MOUNT_SCRIPT,
              '存在' if os.path.exists(src.MOUNT_SCRIPT) else '缺失'))

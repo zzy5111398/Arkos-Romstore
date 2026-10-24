@@ -127,7 +127,7 @@ ROM 商店安装器 v$VERSION（双平台：ArkOS / AURKNIX-ROCKNIX）
                                 # 提示 Permission denied 时用 bash install.sh
 
 
-商店源（可省；省了则沿用已有 source.json 或内置默认 10.168.1.110/Roms 匿名）:
+商店源（可省；省了则沿用已有 source.json 或内置默认 10.168.1.110/Roms、账号 smbshare）:
   --host H            NAS 主机（IP 或主机名），例：10.168.1.110
   --share S           共享名（不带 // 与主机），例：Roms
   --smbuser U         SMB 账号（留空 = 匿名 guest）
@@ -978,7 +978,7 @@ else
     if [ -f "$STORE_DIR/source.json" ]; then
         ok "沿用已有 source.json（未指定 --host）"
     else
-        warn "没有指定 --host，先用内置默认：//10.168.1.110/Roms 匿名"
+        warn "没有指定 --host，先用内置默认：//10.168.1.110/Roms（账号 smbshare）"
         warn "  装完可在商店里按 Start →「修改商店源」改"
     fi
 fi
